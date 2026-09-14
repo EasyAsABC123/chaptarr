@@ -58,3 +58,9 @@ dotnet test src/Chaptarr.Core.Test/Chaptarr.Core.Test.csproj -c Release
 See [the decision record](decisions/0001-series-scoped-monitoring.md) and
 [recorded evidence](series-monitoring-evidence.md), including the baseline NuGet
 advisory and exact invocation used locally.
+
+Catalog request managers may call
+`GET /api/v1/series/lookup?foreignSeriesId=hc:123&includeBookIdentifiers=true`.
+Returned books then include edition `isbns` and `identifiersComplete`. Only complete
+identifier evidence should enable exact work reconciliation. This is optional;
+default catalog responses and acquisition behavior are unchanged. See ADR 0002.
