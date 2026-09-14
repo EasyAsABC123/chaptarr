@@ -164,7 +164,9 @@ MP3 release replaced that audiobook. All 64 files parsed and passed five-second
 decode samples in Audiobookshelf's runtime, and its library scan indexed them.
 Neither the Carl files nor global quality/player settings were changed.
 
-Confidence is high for these measured API, import, scope and decoder outcomes.
-A full-book decode and instrumented client playback are not implied. The first
+The user subsequently confirmed playback and seeking work for the Cibola Burn
+replacement. Confidence is high for this tested path, combining measured API,
+import, scope and decoder outcomes with direct user acceptance. A full-book
+decode and instrumented client playback are not implied. The first
 two Expanse releases remain unchanged. Codec compatibility policy is distinct
 from series navigation/monitoring and should be reviewed separately.
