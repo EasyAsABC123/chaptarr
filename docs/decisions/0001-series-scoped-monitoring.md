@@ -107,3 +107,19 @@ endpoint. Keep future discovery as an explicit separate discussion.
 
 Rollback is a code revert; no migration is needed. Monitoring changes already
 made by an operator remain ordinary book state and are not automatically undone.
+
+## Live-trial boundary: container format and playback compatibility
+
+A real trial imported three xHE-AAC Expanse audiobooks that could not decode using
+Audiobookshelf's installed FFmpeg. A known-working Dungeon Crawler Carl AAC-LC
+file passed the same check, and an approved MP3 replacement for Cibola Burn passed
+samples from every imported file. Download/import success therefore does not by
+itself establish compatibility with a given playback/transcoding path.
+
+Do not reject all M4B files or change series monitoring semantics in response.
+M4B container labels do not establish the AAC profile or client capabilities.
+Any future policy for decoder validation, release rejection or compatible retries
+belongs with the provider's acquisition/import pipeline and must consider direct
+play as well as server transcoding. Keep that proposal separate from current-member
+series navigation and scoped monitoring. Preserve original files when investigating
+compatibility and record bounded sample tests separately from full-file validation.

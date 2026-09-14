@@ -147,3 +147,24 @@ codec but failed a short sample decode. No library file or global quality/player
 configuration was altered to hide this limitation. Deployed signed-in UI behavior
 and future-series watching also remain unverified. No application branch or PR
 was published.
+
+## Follow-up: real user submission and decoder control
+
+A verified Expanse series member, Cibola Burn, was requested through the series
+bulk-request API. The user subsequently reported a SeerrNG UI submission; the
+live record requested both audiobook and ebook. Both formats imported. Because
+the UI request explicitly selected both, its ebook grab cannot be attributed
+solely to companion synchronization. All 279 book monitoring states were checked
+against the before-snapshot, allowing only the user-requested Cibola formats.
+
+Audiobookshelf's actual FFmpeg 8.0.1 failed on the three selected Expanse xHE-AAC
+releases. The same five-second decoder check passed on an existing Dungeon Crawler
+Carl AAC-LC file. After a verified backup of the Cibola original, a targeted approved
+MP3 release replaced that audiobook. All 64 files parsed and passed five-second
+decode samples in Audiobookshelf's runtime, and its library scan indexed them.
+Neither the Carl files nor global quality/player settings were changed.
+
+Confidence is high for these measured API, import, scope and decoder outcomes.
+A full-book decode and instrumented client playback are not implied. The first
+two Expanse releases remain unchanged. Codec compatibility policy is distinct
+from series navigation/monitoring and should be reviewed separately.
