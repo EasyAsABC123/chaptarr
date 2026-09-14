@@ -119,3 +119,31 @@ release discovery remain unverified. The provider continues to own acquisition
 and scheduling. No application branch or PR was published; only authorized operator
 deployment configuration was pushed. Raw library evidence and backups remain
 outside this portable repository record.
+
+## Two-book acquisition and scope follow-up
+
+The operator subsequently requested the first two Expanse audiobooks through
+SeerrNG's normal request API. Both were grabbed and imported by Chaptarr and
+reached available state in SeerrNG. Actual library file sizes matched the database.
+The provider populated author/series metadata automatically, exposing both books
+at positions 1 and 2 without a manual create-series operation.
+
+After import, the new series endpoint toggled only those two audiobook members
+off and back on. Reads verified all 279 current book records after each operation
+and unchanged author policy. Only the two requested audiobooks remained monitored
+among the 96 new catalog records. No remaining series volumes were requested.
+
+The existing author cross-format synchronization policy initially also monitored
+the two ebook companions during normal add/metadata processing. The trial cleared
+only those ebook flags through the scoped ebook-series endpoint. Both audiobook
+monitors and all 183 pre-existing books' monitor states were preserved. This is a
+separate add-policy interaction; the new series monitor does not propagate across
+formats, even with author synchronization enabled.
+
+Confidence is high for measured acquisition, import and series-monitor scope.
+Playback remains unverified: both downloaded releases use xHE-AAC; the deployed
+FFmpeg 6.1.1 probe rejected audio object type 42, and FFmpeg 9.0.1 identified the
+codec but failed a short sample decode. No library file or global quality/player
+configuration was altered to hide this limitation. Deployed signed-in UI behavior
+and future-series watching also remain unverified. No application branch or PR
+was published.
