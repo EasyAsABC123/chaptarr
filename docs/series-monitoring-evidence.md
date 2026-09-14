@@ -95,3 +95,27 @@ API and the narrower navigation change can be discussed separately if desired.
 
 Raw logs, TRX, scripts, screenshots, and JSON state reports are retained in the
 workspace contribution dossier; this repository record contains no credentials.
+
+## Authorized live-library trial
+
+A later operator-authorized deployment ran application commit `9e391bc` on the
+current `origin/develop` baseline `7a06004` (also containing `origin/main`). Native
+membership reads passed for all 710 series records: 88 with current library
+members and 622 empty metadata records. The library contained 183 books
+(111 audiobook, 72 ebook); its 215 series links referenced 126 distinct books,
+with no dangling or cross-format members.
+
+All 89 same-state monitoring calls passed, covering every nonempty series.
+Separate real audiobook and ebook monitoring round-trips changed and immediately
+restored the selected book. Companion-format state and author policies remained
+unchanged, and comparisons at the recorded test times confirmed all 183 books'
+original monitoring states. The configured root was Mixed; both formats passed
+without changing root-folder policy. The normal search schedule was restored.
+
+Confidence is high for these measured API and persistence results. Existing HTTPS
+routes loaded and SSO initiation preserved the series return path, but no signed-in
+browser session was available. Full deployed click-through, acquisition and future
+release discovery remain unverified. The provider continues to own acquisition
+and scheduling. No application branch or PR was published; only authorized operator
+deployment configuration was pushed. Raw library evidence and backups remain
+outside this portable repository record.
