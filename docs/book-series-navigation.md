@@ -64,3 +64,14 @@ Catalog request managers may call
 Returned books then include edition `isbns` and `identifiersComplete`. Only complete
 identifier evidence should enable exact work reconciliation. This is optional;
 default catalog responses and acquisition behavior are unchanged. See ADR 0002.
+
+### Catalog identifier live evidence (2026-09-14)
+
+The optional edition-identifier runtime `ac0f41b` passed 19 focused tests and a
+net10.0 Release publish, then rolled out healthy. The live Wayfarers `hc:1092`
+lookup returned complete ISBN evidence for four members using the actual provider
+query. SeerrNG resolved two members and correctly left two conflicting Open
+Library matches unavailable for requests. The previous individual native book
+lookup had returned HTTP 503. Default API behavior remains opt-in compatible.
+The retained prior runtime `9e391bc` provides rollback. No application source
+branch or PR was published.
