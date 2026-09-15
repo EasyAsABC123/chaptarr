@@ -20,7 +20,8 @@ namespace Chaptarr.Api.V1.ImportLists
                 r?.Implementation != "HardcoverLibraryImportList" &&
                 r?.Implementation != "GoodreadsBookshelf" &&
                 r?.Implementation != "GoodreadsListImportList" &&
-                r?.Implementation != "GoodreadsSeriesImportList";
+                r?.Implementation != "GoodreadsSeriesImportList" &&
+                r?.Implementation != "SeriesWatchImportList";
 
             SharedValidator.When(requiresGenericAddedAuthorSettings, () =>
             {

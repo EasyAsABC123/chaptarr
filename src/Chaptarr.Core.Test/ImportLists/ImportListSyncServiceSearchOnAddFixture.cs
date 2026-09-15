@@ -12,6 +12,7 @@ using NzbDrone.Core.Books.Services;
 using NzbDrone.Core.ImportLists;
 using NzbDrone.Core.ImportLists.Exclusions;
 using NzbDrone.Core.ImportLists.Goodreads;
+using NzbDrone.Core.ImportLists.SeriesWatch;
 using NzbDrone.Core.IndexerSearch;
 using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
@@ -1106,6 +1107,130 @@ namespace Chaptarr.Core.Test.ImportLists
             var bookSearch = commandQueue.Pushed.OfType<BookSearchCommand>().ToList();
             Assert.That(bookSearch, Has.Count.EqualTo(1));
             Assert.That(bookSearch.Single().BookIds, Contains.Item(existingBookId));
+        }
+        [Test]
+        public void series_watch_should_pick_up_a_later_book_without_editing_companion_or_unrelated_books()
+        {
+            var definition = new ImportListDefinition
+            {
+                Id = 1,
+                Name = "Hardcover Library",
+                EnableAutomaticAdd = true,
+                ShouldMonitor = ImportListMonitorType.SpecificBook,
+                ShouldMonitorExisting = true,
+                ShouldSearch = true,
+                Settings = new SeriesWatchImportListSettings
+                {
+                    ProviderId = "hc:988",
+                    MonitorAudiobooks = true,
+                    MonitorEbooks = false,
+                    AudiobookQualityProfileId = 1,
+                    EbookQualityProfileId = 1,
+                    AudiobookMetadataProfileId = 1,
+                    EbookMetadataProfileId = 1,
+                    AudiobookRootFolderPath = "/audiobooks",
+                    EbookRootFolderPath = "/ebooks"
+                }
+            };
+
+            var author = new Author
+            {
+                Id = 2,
+                Name = "Hardcover Author",
+                HardcoverAuthorId = "hc:562254",
+                Monitored = false
+            };
+
+            var existingBookId = 200;
+
+            var books = new List<Book>
+            {
+                new()
+                {
+                    Id = existingBookId,
+                    AuthorId = author.Id,
+                    Author = author,
+                    MediaType = BookMediaType.Audiobook,
+                    HardcoverBookId = "hc:123",
+                    Title = "Hardcover Book",
+                    AudiobookMonitored = false,
+                    EbookMonitored = false
+                }
+            };
+
+            var companion = new Book { Id = 201, AuthorId = author.Id, Author = author, MediaType = BookMediaType.Ebook,
+                HardcoverBookId = "hc:123", EbookMonitored = true };
+            var unrelated = new Book { Id = 202, AuthorId = author.Id, Author = author, MediaType = BookMediaType.Audiobook,
+                HardcoverBookId = "hc:999", AudiobookMonitored = false };
+            books.Add(companion);
+            books.Add(unrelated);
+            var fetcher = new StubFetchAndParseImportList
+            {
+                Items = new List<ImportListItemInfo>
+                {
+                    new()
+                    {
+                        ImportListId = definition.Id,
+                        ImportList = definition.Name,
+                        Author = author.Name,
+                        AuthorProviderId = author.HardcoverAuthorId,
+                        Book = "Hardcover Book",
+                        BookProviderId = "hc:123",
+                        EditionProviderId = "hc-ed:456",
+                        ReleaseDate = DateTime.UtcNow.Date
+                    }
+                }
+            };
+
+            var importListFactoryProxy = DispatchProxy.Create<IImportListFactory, ImportListFactoryProxy>();
+            ((ImportListFactoryProxy)(object)importListFactoryProxy).Definition = definition;
+
+            var authorServiceProxy = DispatchProxy.Create<IAuthorService, AuthorServiceProxy>();
+            ((AuthorServiceProxy)(object)authorServiceProxy).Author = author;
+
+            var bookServiceProxy = DispatchProxy.Create<IBookService, BookServiceProxy>();
+            ((BookServiceProxy)(object)bookServiceProxy).Books = books;
+
+            var commandQueue = new StubCommandQueueManager();
+
+            var service = new ImportListSyncService(
+                importListFactory: importListFactoryProxy,
+                importListExclusionService: new StubImportListExclusionService(),
+                listFetcherAndParser: fetcher,
+                bookInfoProxy: DispatchProxy.Create<NzbDrone.Core.MetadataSource.IProvideBookInfo, ThrowingProxy<NzbDrone.Core.MetadataSource.IProvideBookInfo>>(),
+                authorService: authorServiceProxy,
+                bookService: bookServiceProxy,
+                bookRepository: DispatchProxy.Create<IBookRepository, ThrowingProxy<IBookRepository>>(),
+                editionService: DispatchProxy.Create<IEditionService, ThrowingProxy<IEditionService>>(),
+                editionMetadataProfileFilter: new EditionMetadataProfileFilter(new TestTermMatcherService()),
+                editionSelector: new EditionSelector(LogManager.GetCurrentClassLogger()),
+                authorLibraryService: new StubAuthorLibraryService(),
+                pendingAuthorImportService: DispatchProxy.Create<IPendingAuthorImportService, ThrowingProxy<IPendingAuthorImportService>>(),
+                rootFolderService: DispatchProxy.Create<IRootFolderService, ThrowingProxy<IRootFolderService>>(),
+                rootFolderSettingsResolver: DispatchProxy.Create<IRootFolderSettingsResolver, ThrowingProxy<IRootFolderSettingsResolver>>(),
+                eventAggregator: new StubEventAggregator(),
+                commandQueueManager: commandQueue,
+                logger: LogManager.GetCurrentClassLogger(),
+                bookIdentityCacheRepository: DispatchProxy.Create<IImportListBookIdentityCacheRepository, ThrowingProxy<IImportListBookIdentityCacheRepository>>());
+
+            service.Execute(new ImportListSyncCommand(definition.Id));
+
+            var bookSearch = commandQueue.Pushed.OfType<BookSearchCommand>().ToList();
+            Assert.That(bookSearch, Has.Count.EqualTo(1));
+            Assert.That(bookSearch.Single().BookIds, Is.EquivalentTo(new[] { existingBookId }));
+            Assert.That(companion.EbookMonitored, Is.True);
+            Assert.That(unrelated.AudiobookMonitored, Is.False);
+            var later = new Book { Id = 203, AuthorId = author.Id, Author = author, MediaType = BookMediaType.Audiobook,
+                HardcoverBookId = "hc:124", AudiobookMonitored = false };
+            books.Add(later);
+            fetcher.Items.Add(new ImportListItemInfo { ImportListId = definition.Id, ImportList = definition.Name,
+                Author = author.Name, AuthorProviderId = author.HardcoverAuthorId, Book = "Later book", BookProviderId = "hc:124" });
+            commandQueue.Pushed.Clear();
+            service.Execute(new ImportListSyncCommand(definition.Id));
+            Assert.That(later.AudiobookMonitored, Is.True);
+            Assert.That(companion.EbookMonitored, Is.True);
+            Assert.That(unrelated.AudiobookMonitored, Is.False);
+            Assert.That(commandQueue.Pushed.OfType<BookSearchCommand>().SelectMany(c => c.BookIds), Is.EquivalentTo(new[] { 203 }));
         }
     }
 }
