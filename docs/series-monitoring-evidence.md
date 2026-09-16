@@ -193,3 +193,12 @@ is shorter than the original Caliban's War release (75,608.236916 seconds).
 These successful AAC-LC M4B checks narrow the failure to the tested xHE-AAC
 releases and decoder path. No global quality/player settings were changed, and
 this operational repair adds no series scheduling behavior.
+
+## Shared-series author refresh regression
+
+Kingkiller membership could change from ten Rothfuss entries to only Rogues when
+Martin refreshed. Both direct Chaptarr series APIs and SeerrNG showed the same
+one-book response. Two regression cases reproduced the cross-author deletion.
+Author-scoped reconciliation now preserves other authors' members and prunes only
+owned links, including when a series disappears from an author's metadata.
+Focused refresh tests (13) and the complete core suite (3,063) pass. See ADR 0005.

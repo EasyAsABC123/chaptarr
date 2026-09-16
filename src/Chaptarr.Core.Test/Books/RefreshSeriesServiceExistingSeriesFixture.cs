@@ -317,6 +317,42 @@ namespace Chaptarr.Core.Test.Books
             }
         }
 
+        [TestCase(BookMediaType.Audiobook)]
+        [TestCase(BookMediaType.Ebook)]
+        public void author_refresh_should_preserve_other_authors_and_prune_only_its_own_links(BookMediaType mediaType)
+        {
+            var main = new Book { Id = 1, AuthorId = 38, Title = "The Name of the Wind", MediaType = mediaType, GoodreadsWorkId = "gr:1" };
+            var removed = new Book { Id = 2, AuthorId = 38, Title = "Removed membership", MediaType = mediaType, GoodreadsWorkId = "gr:2" };
+            var anthology = new Book { Id = 3, AuthorId = 9, Title = "Rogues", MediaType = mediaType, GoodreadsWorkId = "gr:3" };
+            var series = new Series { Id = 170, Title = "The Kingkiller Chronicle", GoodreadsSeriesId = "gr:45262", MediaType = mediaType };
+            var books = DispatchProxy.Create<IBookService, BookServiceProxy>();
+            ((BookServiceProxy)(object)books).Books = new List<Book> { main, removed, anthology };
+            var seriesService = new StubSeriesService();
+            seriesService.SeriesByAuthor.Add(series);
+            var links = new StubSeriesBookLinkService();
+            links.SetLinks(series.Id, new[] { main, removed }.Select(b => new SeriesBookLink
+            {
+                SeriesId = series.Id, BookId = b.Id, Book = b, Position = "1", IsPrimary = true, SeriesInstanceType = "original"
+            }).ToArray());
+            var sut = new TestableRefreshSeriesService(books, seriesService, links,
+                new RefreshSeriesBookLinkService(links, LogManager.GetCurrentClassLogger()), LogManager.GetCurrentClassLogger());
+
+            var martin = CreateRemoteSeries(series.Title, series.GoodreadsSeriesId, mediaType, anthology);
+            sut.RefreshSeriesInfo(9, new List<Series> { martin }, new Author(), false, false, null);
+            Assert.That(links.GetLinksBySeries(170).Select(l => l.BookId), Is.EquivalentTo(new[] { 1, 2, 3 }));
+
+            var rothfuss = CreateRemoteSeries(series.Title, series.GoodreadsSeriesId, mediaType, main);
+            sut.RefreshSeriesInfo(38, new List<Series> { rothfuss }, new Author(), false, false, null);
+            Assert.That(links.GetLinksBySeries(170).Select(l => l.BookId), Is.EquivalentTo(new[] { 1, 3 }));
+
+            // This author no longer reports Kingkiller; another reported series makes
+            // the refresh authoritative enough to prune this author's old membership.
+            var other = CreateRemoteSeries("Other", "gr:999", mediaType, anthology);
+            sut.RefreshSeriesInfo(9, new List<Series> { other }, new Author(), false, false, null);
+            Assert.That(links.GetLinksBySeries(170).Select(l => l.BookId), Is.EquivalentTo(new[] { 1 }));
+            Assert.That(seriesService.DeletedIds, Does.Not.Contain(170));
+        }
+
         [Test]
         public void should_backfill_links_for_existing_matched_original_series()
         {
