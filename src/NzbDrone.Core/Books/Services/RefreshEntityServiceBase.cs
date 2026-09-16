@@ -124,7 +124,7 @@ namespace NzbDrone.Core.Books
         {
         }
 
-        public bool RefreshEntityInfo(TEntity local, List<TEntity> remoteItems, Author remoteData, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastUpdate)
+        public bool RefreshEntityInfo(TEntity local, List<TEntity> remoteItems, Author remoteData, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastUpdate, Func<TChild, bool> childScope = null)
         {
             var updated = false;
 
@@ -191,7 +191,7 @@ namespace NzbDrone.Core.Books
             _logger.Trace($"updated: {updated} forceUpdateFileTags: {forceUpdateFileTags}");
 
             var remoteChildren = GetRemoteChildren(local, remote);
-            updated |= SortChildren(local, remoteChildren, remoteData, forceChildRefresh, forceUpdateFileTags, lastUpdate);
+            updated |= SortChildren(local, remoteChildren, remoteData, forceChildRefresh, forceUpdateFileTags, lastUpdate, childScope);
 
             // Do this last so entity only marked as refreshed if refresh of children completed successfully
             _logger.Trace($"Saving {typeof(TEntity).Name} {local}");
@@ -221,9 +221,15 @@ namespace NzbDrone.Core.Books
         }
 
 
-        protected bool SortChildren(TEntity entity, List<TChild> remoteChildren, Author remoteData, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastUpdate)
+        protected bool SortChildren(TEntity entity, List<TChild> remoteChildren, Author remoteData, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastUpdate, Func<TChild, bool> childScope = null)
         {
             var localChildren = GetLocalChildren(entity, remoteChildren);
+            if (childScope != null)
+            {
+                // A partial parent refresh must not reconcile children outside its scope.
+                localChildren = localChildren.Where(childScope).ToList();
+                remoteChildren = remoteChildren.Where(childScope).ToList();
+            }
 
             var sortedChildren = new SortedChildren();
             sortedChildren.Deleted.AddRange(localChildren);

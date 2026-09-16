@@ -14,6 +14,7 @@ using NzbDrone.Core.Books.Services;
 using NzbDrone.Core.Exceptions;
 using NzbDrone.Core.ImportLists.Exclusions;
 using NzbDrone.Core.ImportLists.Goodreads;
+using NzbDrone.Core.ImportLists.SeriesWatch;
 using NzbDrone.Core.IndexerSearch;
 using NzbDrone.Core.ImportLists.Hardcover.Library;
 using NzbDrone.Core.Messaging.Commands;
@@ -2433,6 +2434,8 @@ namespace NzbDrone.Core.ImportLists
                             var (bookPrefix, bookRawId) = SplitProviderId(bookProviderId);
                             var targetBooks = GetCachedBooksByAuthor(author.Id)
                                 .Where(b => BookMatchesProviderId(b, bookPrefix, bookProviderId, bookRawId))
+                                .Where(b => importList.Settings is not SeriesWatchImportListSettings watch ||
+                                    (b.MediaType == BookMediaType.Audiobook ? watch.MonitorAudiobooks : watch.MonitorEbooks))
                                 .ToList();
 
                             if (!targetBooks.Any())

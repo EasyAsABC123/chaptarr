@@ -46,7 +46,7 @@ namespace Chaptarr.Api.V1.Series
         }
 
         [HttpGet]
-        public ActionResult<SeriesLookupResource> GetSeriesInfo([FromQuery] string foreignSeriesId, [FromQuery] string provider = "hardcover", [FromQuery] int? metadataProfileId = null, [FromQuery] int? primaryWorkCount = null)
+        public ActionResult<SeriesLookupResource> GetSeriesInfo([FromQuery] string foreignSeriesId, [FromQuery] string provider = "hardcover", [FromQuery] int? metadataProfileId = null, [FromQuery] int? primaryWorkCount = null, [FromQuery] bool includeBookIdentifiers = false)
         {
             if (string.IsNullOrWhiteSpace(foreignSeriesId))
             {
@@ -102,7 +102,7 @@ namespace Chaptarr.Api.V1.Series
                     }
                 }
 
-                var series = GetHardcoverSeriesDetails(seriesId, primaryWorkCount);
+                var series = GetHardcoverSeriesDetails(seriesId, primaryWorkCount, includeBookIdentifiers);
                 if (series == null)
                 {
                     return NotFound();
@@ -134,7 +134,7 @@ namespace Chaptarr.Api.V1.Series
             return (trimmed.Substring(0, idx), trimmed.Substring(idx + 1));
         }
 
-        private SeriesLookupResource GetHardcoverSeriesDetails(int seriesId, int? primaryWorkCount)
+        private SeriesLookupResource GetHardcoverSeriesDetails(int seriesId, int? primaryWorkCount, bool includeBookIdentifiers)
         {
             // Prefer featured (primary) books for series previews.
             const int pageSize = 50;
@@ -151,7 +151,7 @@ namespace Chaptarr.Api.V1.Series
 
             while (true)
             {
-                var page = FetchHardcoverSeriesPage(seriesId, pageSize, offset);
+                var page = FetchHardcoverSeriesPage(seriesId, pageSize, offset, includeBookIdentifiers);
                 if (page.Series == null)
                 {
                     return null;
@@ -199,7 +199,7 @@ namespace Chaptarr.Api.V1.Series
             // If we got no featured books (some series may not have them), fall back to first books.
             if (books.Count == 0)
             {
-                var fallback = FetchHardcoverSeriesFallbackBooks(seriesId);
+                var fallback = FetchHardcoverSeriesFallbackBooks(seriesId, includeBookIdentifiers);
                 if (fallback.Series == null)
                 {
                     return null;
@@ -327,7 +327,7 @@ namespace Chaptarr.Api.V1.Series
             return a;
         }
 
-        private (HardcoverSeriesMeta Series, List<SeriesBookResource> PrimaryBooks) FetchHardcoverSeriesPage(int seriesId, int limit, int offset)
+        private (HardcoverSeriesMeta Series, List<SeriesBookResource> PrimaryBooks) FetchHardcoverSeriesPage(int seriesId, int limit, int offset, bool includeBookIdentifiers)
         {
             var query = @"
 	                query SeriesLookup($id: Int!, $limit: Int!, $offset: Int!) {
@@ -357,6 +357,11 @@ namespace Chaptarr.Api.V1.Series
 	                    }
 	                  }
 	                }";
+
+            if (includeBookIdentifiers)
+            {
+                query = query.Replace("release_date", "release_date editions(order_by: { id: asc }, limit: 201) { isbn_13 isbn_10 }");
+            }
 
             var graphqlRequest = new
             {
@@ -461,9 +466,12 @@ namespace Chaptarr.Api.V1.Series
                         ? rcEl.GetInt32()
                         : 0;
 
+                    var identifiers = includeBookIdentifiers ? SeriesBookIdentifiers.Read(bookEl) : null;
                     books.Add(new SeriesBookResource
                     {
                         ForeignBookId = $"hc:{bookId}",
+                        Isbns = identifiers?.Isbns,
+                        IdentifiersComplete = identifiers?.Complete,
                         Title = title,
                         Overview = overview,
                         AuthorName = authorName,
@@ -479,7 +487,7 @@ namespace Chaptarr.Api.V1.Series
             return (meta, books);
         }
 
-        private (HardcoverSeriesMeta Series, List<SeriesBookResource> FallbackBooks) FetchHardcoverSeriesFallbackBooks(int seriesId)
+        private (HardcoverSeriesMeta Series, List<SeriesBookResource> FallbackBooks) FetchHardcoverSeriesFallbackBooks(int seriesId, bool includeBookIdentifiers)
         {
             var query = @"
 	                query SeriesLookupFallback($id: Int!) {
@@ -508,6 +516,11 @@ namespace Chaptarr.Api.V1.Series
 	                    }
 	                  }
 	                }";
+
+            if (includeBookIdentifiers)
+            {
+                query = query.Replace("release_date", "release_date editions(order_by: { id: asc }, limit: 201) { isbn_13 isbn_10 }");
+            }
 
             var graphqlRequest = new
             {
@@ -610,9 +623,12 @@ namespace Chaptarr.Api.V1.Series
                         ? rcEl.GetInt32()
                         : 0;
 
+                    var identifiers = includeBookIdentifiers ? SeriesBookIdentifiers.Read(bookEl) : null;
                     books.Add(new SeriesBookResource
                     {
                         ForeignBookId = $"hc:{bookId}",
+                        Isbns = identifiers?.Isbns,
+                        IdentifiersComplete = identifiers?.Complete,
                         Title = title,
                         Overview = overview,
                         AuthorName = authorName,
@@ -713,6 +729,14 @@ namespace Chaptarr.Api.V1.Series
     {
         [JsonPropertyName("foreignBookId")]
         public string ForeignBookId { get; set; }
+
+        [JsonPropertyName("isbns")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<string> Isbns { get; set; }
+
+        [JsonPropertyName("identifiersComplete")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? IdentifiersComplete { get; set; }
 
         [JsonPropertyName("foreignAuthorId")]
         public string ForeignAuthorId { get; set; }

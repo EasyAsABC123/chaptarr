@@ -19,6 +19,7 @@ import formatBytes from 'Utilities/Number/formatBytes';
 import stripHtml from 'Utilities/String/stripHtml';
 import translate from 'Utilities/String/translate';
 import BookDetailsLinks from './BookDetailsLinks';
+import BookSeriesLinks from './BookSeriesLinks';
 import styles from './BookDetailsHeader.css';
 
 const defaultFontSize = parseInt(fonts.defaultFontSize);
@@ -147,6 +148,7 @@ class BookDetailsHeader extends Component {
 
   render() {
     const {
+      id,
       width,
       titleSlug,
       title,
@@ -244,7 +246,12 @@ class BookDetailsHeader extends Component {
 
             <div className={styles.details}>
               <div>
-                {seriesTitle}
+                <BookSeriesLinks
+                  bookId={id}
+                  authorId={author.id}
+                  mediaType={mediaType}
+                  seriesTitle={seriesTitle}
+                />
               </div>
 
               <div>

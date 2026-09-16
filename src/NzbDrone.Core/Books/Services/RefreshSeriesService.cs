@@ -598,9 +598,30 @@ namespace NzbDrone.Core.Books
                 .Select(g => g.First())
                 .ToList();
 
+            // Series are shared by authors (for example, an anthology containing a
+            // related story). Author metadata is authoritative only for that author's
+            // books, never for every member of the shared series.
+            var authorBookIds = (_bookService.GetBooksByAuthor(authorId) ?? new List<Book>())
+                .Select(book => book.Id).ToHashSet();
+            bool InAuthorScope(SeriesBookLink link) => link != null && authorBookIds.Contains(link.BookId);
+
             foreach (var item in all)
             {
-                updated |= RefreshEntityInfo(item, providerBackedRemoteSeries, remoteData, forceBookRefresh, forceUpdateFileTags, lastUpdate);
+                if (!providerBackedRemoteSeries.Any(remote => MatchesRemoteSeries(item, remote)))
+                {
+                    var removed = _linkService.GetLinksBySeries(item.Id).Where(InAuthorScope).ToList();
+                    _linkService.DeleteMany(removed);
+                    updated |= removed.Count > 0;
+                    if (!_linkService.GetLinksBySeries(item.Id).Any())
+                    {
+                        _seriesService.Delete(item.Id);
+                    }
+
+                    continue;
+                }
+
+                updated |= RefreshEntityInfo(item, providerBackedRemoteSeries, remoteData,
+                    forceBookRefresh, forceUpdateFileTags, lastUpdate, InAuthorScope);
             }
 
             return updated;

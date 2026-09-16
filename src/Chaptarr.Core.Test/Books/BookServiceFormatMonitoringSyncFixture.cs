@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using Chaptarr.Api.V1.Series;
+using Chaptarr.Core.Test.Api.Series;
+using Microsoft.AspNetCore.Mvc;
 using NLog;
 using NUnit.Framework;
 using NzbDrone.Common.Messaging;
@@ -48,6 +51,8 @@ namespace Chaptarr.Core.Test.Books
             public Book Get(int id) => _booksById.TryGetValue(id, out var book) ? book : null;
 
             public IEnumerable<Book> Get(IEnumerable<int> ids) => (ids ?? Enumerable.Empty<int>()).Select(Get).Where(book => book != null).ToList();
+
+            public IEnumerable<Book> FindExisting(IEnumerable<int> ids) => Get(ids);
 
             public Book Update(Book model)
             {
@@ -331,6 +336,40 @@ namespace Chaptarr.Core.Test.Books
                 seriesBookLinkRepository: new StubSeriesBookLinkRepository(),
                 multiCopySeriesService: null,
                 logger: LogManager.GetCurrentClassLogger());
+        }
+
+        [TestCase(BookMediaType.Ebook, true)]
+        [TestCase(BookMediaType.Ebook, false)]
+        [TestCase(BookMediaType.Audiobook, true)]
+        [TestCase(BookMediaType.Audiobook, false)]
+        public void series_monitor_should_preserve_unrelated_books_companion_format_and_author_policy(BookMediaType format, bool monitored)
+        {
+            var author = BuildAuthor(1);
+            var initial = !monitored;
+            var selected = BuildBook(10, author.Id, format, "hc:work-1", initial);
+            var companion = BuildBook(11, author.Id, format == BookMediaType.Ebook ? BookMediaType.Audiobook : BookMediaType.Ebook, "hc:work-1", initial);
+            var unrelated = BuildBook(12, author.Id, format, "hc:work-2", initial);
+            var repository = new StubBookRepository(new[] { selected, companion, unrelated });
+            var events = new StubEventAggregator();
+            var service = BuildService(repository, new StubAuthorService(new[] { author }), events);
+            var ebookPolicy = author.EbookMonitorNewItems;
+            var audioPolicy = author.AudiobookMonitorNewItems;
+            var subject = new SeriesMonitorController(
+                SeriesMonitorFixture.Proxy<ISeriesService>((method, args) => new Series { Id = 1, MediaType = format }),
+                SeriesMonitorFixture.Proxy<ISeriesBookLinkService>((method, args) => new List<SeriesBookLink> { new SeriesBookLink { SeriesId = 1, BookId = selected.Id } }),
+                service);
+
+            Assert.That(subject.Monitor(1, new SeriesMonitorResource { BookIds = new[] { selected.Id }, Monitored = monitored }), Is.TypeOf<OkObjectResult>());
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(repository.Get(selected.Id).IsMonitoredForMediaType(format), Is.EqualTo(monitored));
+                Assert.That(repository.Get(companion.Id).IsMonitoredForMediaType(companion.MediaType), Is.EqualTo(initial));
+                Assert.That(repository.Get(unrelated.Id).IsMonitoredForMediaType(format), Is.EqualTo(initial));
+                Assert.That(author.EbookMonitorNewItems, Is.EqualTo(ebookPolicy));
+                Assert.That(author.AudiobookMonitorNewItems, Is.EqualTo(audioPolicy));
+                Assert.That(events.Published.OfType<BookEditedEvent>().Count(), Is.EqualTo(1));
+            });
         }
 
         [Test]

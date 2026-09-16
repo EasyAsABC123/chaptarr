@@ -2182,5 +2182,11 @@
   "Year": "Year",
   "Yes": "Yes",
   "YesCancel": "Yes, Cancel",
-  "Yesterday": "Yesterday"
+  "Yesterday": "Yesterday",
+  "MonitorSeriesBooks": "Monitor all books",
+  "UnmonitorSeriesBooks": "Unmonitor all books",
+  "SeriesBooksLoadFailed": "Unable to load the books in this series.",
+  "SeriesMonitoringFailed": "Unable to update monitoring for this series.",
+  "SeriesMonitoringNotSaved": "Some books could not be monitored. Check author monitoring and edition availability, then try again.",
+  "SeriesCurrentBooksMonitoringHelp": "Monitoring applies to the books currently in this series. Future books require an import list."
 }

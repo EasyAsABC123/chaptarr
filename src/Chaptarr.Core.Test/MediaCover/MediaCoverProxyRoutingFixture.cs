@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Reflection;
 using System.Threading.Tasks;
+using Chaptarr.Api.V1.MediaCovers;
 using Chaptarr.Http.Frontend.Mappers;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -23,6 +24,31 @@ namespace Chaptarr.Core.Test.MediaCover
     public class MediaCoverProxyRoutingFixture
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
+        [Test]
+        public void api_artwork_should_reuse_proxy_bytes_and_missing_image_policy()
+        {
+            var proxy = new MediaCoverProxyStub();
+            var controller = new MediaCoverProxyController(proxy, Logger);
+            var hash = new string('a', 64);
+            var image = controller.GetCover(hash, "cover.jpg") as FileContentResult;
+            Assert.That(image?.FileContents, Is.EqualTo(new byte[] { 1, 2, 3 }));
+            Assert.That(image?.ContentType, Is.EqualTo("image/jpeg"));
+            proxy.Placeholder = true;
+            Assert.That((controller.GetCover(hash, "cover.jpg") as StatusCodeResult)?.StatusCode, Is.EqualTo(404));
+            proxy.Missing = true;
+            Assert.That((controller.GetCover(hash, "cover.jpg") as StatusCodeResult)?.StatusCode, Is.EqualTo(404));
+        }
+
+        [TestCase("../../config.xml")]
+        [TestCase("cover.svg")]
+        [TestCase("cover.jpg?url=https://example.com")]
+        public void api_artwork_should_reject_untrusted_paths_and_active_content(string filename)
+        {
+            var controller = new MediaCoverProxyController(new MediaCoverProxyStub(), Logger);
+            Assert.That(controller.GetCover(new string('a', 64), filename), Is.TypeOf<NotFoundResult>());
+            Assert.That(controller.GetCover("https://example.com", "cover.jpg"), Is.TypeOf<NotFoundResult>());
+        }
 
         private class ConfigFileProviderProxy : DispatchProxy
         {
