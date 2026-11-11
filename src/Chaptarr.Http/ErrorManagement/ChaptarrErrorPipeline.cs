@@ -61,6 +61,20 @@ namespace Chaptarr.Http.ErrorManagement
                 await response.WriteAsync(STJson.ToJson(errors));
                 return;
             }
+            else if (exception is BookMetadataPendingException pendingMetadata)
+            {
+                response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                response.ContentType = "application/json";
+                response.Headers["Retry-After"] = pendingMetadata.RetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                await response.WriteAsync(STJson.ToJson(new
+                {
+                    message = pendingMetadata.Message,
+                    code = "metadata_pending",
+                    providerId = pendingMetadata.ProviderId,
+                    retryAfterSeconds = pendingMetadata.RetryAfterSeconds
+                }));
+                return;
+            }
             else if (exception is NzbDroneClientException clientException)
             {
                 _logger.Debug(clientException, "Client error during request {0} {1}: {2}", context.Request.Method, context.Request.Path, clientException.Message);

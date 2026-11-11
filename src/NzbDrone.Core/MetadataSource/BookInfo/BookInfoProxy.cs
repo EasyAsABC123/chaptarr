@@ -2519,7 +2519,7 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
                 _logger.Warn(ex, ex.Message);
                 throw new GoodreadsException("Search for '{0}' failed. Unable to communicate with Goodreads.", ex, title);
             }
-            catch (Exception ex) when (ex is not BookInfoException)
+            catch (Exception ex) when (ex is not BookInfoException && ex is not BookMetadataPendingException)
             {
                 _logger.Warn(ex, ex.Message);
                 throw new GoodreadsException("Search for '{0}' failed. Invalid response received from Goodreads.", ex, title);
@@ -3130,9 +3130,8 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
 
                 if (httpResponse.StatusCode == HttpStatusCode.Accepted)
                 {
-                    // Work not ready (typically because the upstream metadata server queued the author/work for import).
-                    // Treat as "not found" so callers can retry later without surfacing an exception.
-                    throw new BookNotFoundException(foreignBookId);
+                    // Accepted is asynchronous preparation, not evidence that the work is missing.
+                    throw new BookMetadataPendingException(foreignBookId, MetadataServerHealthGate.GetRetryAfter(httpResponse));
                 }
 
                 if (httpResponse.StatusCode == HttpStatusCode.Conflict &&

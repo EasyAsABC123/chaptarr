@@ -20,6 +20,15 @@ namespace Chaptarr.Core.Test.Http
     [TestFixture]
     public class CachedHttpResponseRepositoryFixture
     {
+        [OneTimeSetUp]
+        public void RegisterMappings()
+        {
+            if (!TableMapping.Mapper.TableMap.ContainsKey(typeof(CachedHttpResponse)))
+            {
+                TableMapping.Map();
+            }
+        }
+
         private sealed class Events : IEventAggregator
         {
             public void PublishEvent<TEvent>(TEvent value) where TEvent : class, IEvent { }

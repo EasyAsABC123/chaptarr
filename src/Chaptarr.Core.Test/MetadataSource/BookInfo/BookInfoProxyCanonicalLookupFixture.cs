@@ -279,6 +279,42 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
 }";
 
         [Test]
+        public void should_preserve_pending_work_state_and_retry_delay_then_allow_a_ready_retry()
+        {
+            var pending = true;
+            var client = new RecordingHttpClient(request =>
+            {
+                var headers = new HttpHeader { ContentType = "application/json" };
+                headers["Retry-After"] = "60";
+                return new HttpResponse(request, headers, pending ? "null" : GoodreadsWorkPayload,
+                    pending ? HttpStatusCode.Accepted : HttpStatusCode.OK);
+            });
+            var proxy = CreateProxy(client);
+
+            var error = Assert.Throws<BookMetadataPendingException>(() => proxy.GetBookInfo("gr:3046572"));
+            Assert.That(error.RetryAfterSeconds, Is.EqualTo(60));
+            Assert.That(client.Requests.Count, Is.EqualTo(1), "Pending work must not trigger an immediate retry storm.");
+            pending = false;
+            Assert.That(proxy.GetBookInfo("gr:3046572").Item2, Is.Not.Null);
+        }
+
+        [Test]
+        public void should_not_turn_pending_search_metadata_into_missing_books()
+        {
+            var proxy = CreateProxy(new RecordingHttpClient(request =>
+                new HttpResponse(request, new HttpHeader(), "null", HttpStatusCode.Accepted)));
+            Assert.Throws<BookMetadataPendingException>(() => proxy.SearchForNewBook("gr:3046572", null));
+        }
+
+        [Test]
+        public void should_keep_actual_missing_work_distinct_from_pending_metadata()
+        {
+            var proxy = CreateProxy(new RecordingHttpClient(request =>
+                new HttpResponse(request, new HttpHeader(), "null", HttpStatusCode.NotFound)));
+            Assert.Throws<BookNotFoundException>(() => proxy.GetBookInfo("gr:3046572"));
+        }
+
+        [Test]
         public void should_send_matching_goodreads_author_hint_on_v5_work_lookup()
         {
             var httpClient = new RecordingHttpClient(req =>
@@ -754,7 +790,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
         }
 
         [Test]
-        public void should_return_empty_list_when_canonical_lookup_not_ready()
+        public void should_return_pending_state_when_canonical_lookup_not_ready()
         {
             var httpClient = new RecordingHttpClient(req =>
                 new HttpResponse(req, new HttpHeader { ContentType = "application/json" }, "null", HttpStatusCode.Accepted));
@@ -776,9 +812,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
                 cacheManager: new CacheManager(),
                 metadataServerHealthGate: CreateHealthGate(configService));
 
-            var results = proxy.SearchForNewBook("hc:12345", author: null);
-
-            Assert.That(results, Is.Empty);
+            Assert.Throws<BookMetadataPendingException>(() => proxy.SearchForNewBook("hc:12345", author: null));
             Assert.That(httpClient.Requests, Has.Count.EqualTo(1));
         }
 
