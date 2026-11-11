@@ -1476,6 +1476,14 @@ namespace NzbDrone.Core.Books
 
             foreach (var authorBooks in changedBooks.Where(book => book?.AuthorId > 0).GroupBy(book => book.AuthorId))
             {
+                // Work-group synchronization only reacts to monitoring transitions.
+                // Metadata-only saves cannot enable/disable a counterpart.
+                if (!authorBooks.Any(book => storedById.TryGetValue(book.Id, out var stored) &&
+                                             IsRowMonitored(book) != IsRowMonitored(stored)))
+                {
+                    continue;
+                }
+
                 var author = _authorService.GetAuthor(authorBooks.Key);
                 if (author?.SyncMonitoredAcrossFormats != true)
                 {

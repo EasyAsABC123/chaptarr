@@ -14,6 +14,7 @@ namespace NzbDrone.Core.Books
     public interface IBookAddedService
     {
         void SearchForRecentlyAdded(int authorId);
+        void SearchForBook(int bookId);
     }
 
     public class BookAddedService : IHandle<BookInfoRefreshedEvent>, IBookAddedService
@@ -32,6 +33,19 @@ namespace NzbDrone.Core.Books
             _bookService = bookService;
             _logger = logger;
             _addedBooksCache = cacheManager.GetCache<List<int>>(GetType());
+        }
+
+        public void SearchForBook(int bookId)
+        {
+            var book = _bookService.GetBook(bookId);
+            if (!book.IsMonitoredWithAuthor())
+            {
+                return;
+            }
+
+            book.AddOptions.SearchForNewBook = false;
+            _bookService.SetAddOptions(new[] { book });
+            _commandQueueManager.Push(new BookSearchCommand(new List<int> { bookId }));
         }
 
         public void SearchForRecentlyAdded(int authorId)

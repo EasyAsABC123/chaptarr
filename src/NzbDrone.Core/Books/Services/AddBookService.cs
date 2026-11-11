@@ -25,6 +25,8 @@ namespace NzbDrone.Core.Books
 
     public class AddBookService : IAddBookService
     {
+        // Bounded striped locks protect concurrent first-book adds for the same author.
+        private static readonly object[] SingleWorkLocks = Enumerable.Range(0, 64).Select(_ => new object()).ToArray();
         private readonly IAuthorService _authorService;
         private readonly IAuthorLibraryService _authorLibraryService;
         private readonly IBookService _bookService;
@@ -128,7 +130,9 @@ namespace NzbDrone.Core.Books
 
             if (dbBook == null)
             {
-                return await RequestBookThroughAuthorCatalog(book);
+                return book.Author?.AddOptions?.Monitor == MonitorTypes.All
+                    ? await RequestBookThroughAuthorCatalog(book)
+                    : await RequestSingleWork(book);
             }
 
             book.UseDbFieldsFrom(dbBook);
@@ -170,7 +174,9 @@ namespace NzbDrone.Core.Books
 
             if (dbAuthor == null)
             {
-                return await RequestBookThroughAuthorCatalog(book);
+                return book.Author?.AddOptions?.Monitor == MonitorTypes.All
+                    ? await RequestBookThroughAuthorCatalog(book)
+                    : await RequestSingleWork(book);
             }
 
                 // CRITICAL: Capture monitoring intent BEFORE replacing Author object
@@ -398,6 +404,109 @@ namespace NzbDrone.Core.Books
             var mediaTypeName = mediaType == BookMediaType.Audiobook ? "audiobook" : "ebook";
             _authorService.EnsureMediaTypeMonitoring(author.Id, mediaTypeName);
             return _authorService.GetAuthor(author.Id) ?? author;
+        }
+
+        private Task<Book> RequestSingleWork(Book request)
+        {
+            var workId = ResolveRequestedWorkProviderId(request);
+            var authorId = GetAuthorProviderId(request.Author);
+            if (string.IsNullOrWhiteSpace(workId) || string.IsNullOrWhiteSpace(authorId))
+            {
+                throw new ValidationException(new[] { new ValidationFailure("ForeignBookId", "A single-book request requires work and author provider IDs.") });
+            }
+
+            // Resolve only this work; never request an author's catalog to add a book.
+            var metadata = _bookInfo.GetBookInfo(workId, request.MediaType, authorId);
+            var book = metadata?.Item2;
+            if (book == null || book.Editions?.Any() != true ||
+                !WorkIdMatcher.CrossFormatSafeMatches(request, book))
+            {
+                throw new ValidationException(new[] { new ValidationFailure("Metadata", "The requested work did not return matching book and edition metadata.") });
+            }
+
+            var requestedEditionIds = GetRequestedEditionProviderIdsFromPayload(request.Editions);
+            var requestedAuthor = request.Author;
+            var remoteAuthor = book.Author ?? metadata.Item3?.FirstOrDefault();
+            if (remoteAuthor == null)
+            {
+                throw new ValidationException(new[] { new ValidationFailure("Author", "The requested work did not include author metadata.") });
+            }
+
+            var lockKey = GetAuthorProviderId(remoteAuthor) ?? authorId;
+            lock (SingleWorkLocks[(int)((uint)StringComparer.OrdinalIgnoreCase.GetHashCode(lockKey) % (uint)SingleWorkLocks.Length)])
+            {
+                // Preserve requested profiles/roots/monitoring while taking authoritative author identity.
+                requestedAuthor.UseMetadataFrom(remoteAuthor);
+                book.Author = requestedAuthor;
+                var author = FindExistingAuthorForAdd(book);
+                var parts = workId.Split(new[] { ':' }, 2);
+                if (_bookService.FindByProviderId(parts[0], workId, request.MediaType) != null)
+                {
+                    return AddBook(request, doRefresh: false);
+                }
+                if (author == null)
+                {
+                    requestedAuthor.Added = DateTime.UtcNow;
+                    if (ResolveMetadataProfile(requestedAuthor, request.MediaType) == null)
+                    {
+                        throw new ValidationException(new[] { new ValidationFailure("MetadataProfile", "A metadata profile is required for the requested format.") });
+                    }
+
+                    author = _authorService.AddAuthor(requestedAuthor, doRefresh: false);
+                }
+                else
+                {
+                    author = _authorService.UpdateAuthorProgressiveSettings(author,
+                        requestedAuthor.AudiobookQualityProfileId, requestedAuthor.AudiobookMetadataProfileId,
+                        requestedAuthor.AudiobookMonitored, requestedAuthor.AudiobookMonitorNewItems,
+                        requestedAuthor.EbookQualityProfileId, requestedAuthor.EbookMetadataProfileId,
+                        requestedAuthor.EbookMonitored, requestedAuthor.EbookMonitorNewItems,
+                        request.MediaType == BookMediaType.Audiobook ? requestedAuthor.AudiobookRootFolderPath : requestedAuthor.EbookRootFolderPath);
+                }
+
+                if (ResolveMetadataProfile(author, request.MediaType) == null)
+                {
+                    throw new ValidationException(new[] { new ValidationFailure("MetadataProfile", "The requested format is disabled for this author.") });
+                }
+
+                if (request.IsMonitored())
+                {
+                    author = EnsureMediaTypeMonitoringForRequestedBook(author, request.MediaType);
+                }
+
+                book.Id = 0;
+                book.Author = author;
+                book.AuthorId = author.Id;
+                book.MediaType = request.MediaType;
+                book.AnyEditionOk = request.AnyEditionOk;
+                book.WantedNarratorId = request.WantedNarratorId;
+                book.WantedNarrator = request.WantedNarrator;
+                var pinnedIds = (request.Editions ?? new List<Edition>())
+                    .Where(edition => edition.ManualAdd && edition.Monitored)
+                    .SelectMany(BookEditionIdentity.GetEditionProviderIds)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var edition in book.Editions)
+                {
+                    edition.Id = 0;
+                    edition.BookId = 0;
+                    edition.ManualAdd = BookEditionIdentity.GetEditionProviderIds(edition).Any(pinnedIds.Contains);
+                }
+                book.SetMonitored(request.IsMonitored());
+                book.Added = DateTime.UtcNow;
+                book.AddOptions = request.AddOptions ?? new AddBookOptions();
+                book.AddOptions.AddType = BookAddType.Manual;
+                ApplyEditionRetentionForAdd(book, requestedEditionIds);
+                RemoveMatchingImportListExclusions(book);
+                // Metadata is already resolved. BookAddedHandler must not refresh the author.
+                var added = _bookService.AddBook(book, doRefresh: false);
+                if (book.AddOptions.SearchForNewBook)
+                {
+                    _bookAddedService.SearchForBook(added.Id);
+                }
+
+                return Task.FromResult(added);
+            }
+
         }
 
         private async Task<Book> RequestBookThroughAuthorCatalog(Book requestedBook)

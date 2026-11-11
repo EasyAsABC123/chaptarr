@@ -1,5 +1,6 @@
 using NzbDrone.Core.Books.Commands;
 using NzbDrone.Core.Books.Events;
+using NzbDrone.Core.MediaCover.Commands;
 using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
 
@@ -16,10 +17,12 @@ namespace NzbDrone.Core.Books
 
         public void Handle(BookAddedEvent message)
         {
+            _commandQueueManager.Push(new DownloadBookMediaCommand(message.Book.Id));
+
             if (message.DoRefresh && message.Book.AuthorId > 0)
             {
-                // When a new book is added, we need both metadata refresh and folder scan to find its files
-                _commandQueueManager.Push(new RefreshAuthorCommand(message.Book.AuthorId, refreshMetadata: true, rescanFolders: true, forceRefresh: true));
+                // A book request refreshes this work only; author refresh is a separate action.
+                _commandQueueManager.Push(new RefreshBookCommand(message.Book.Id));
             }
         }
     }
