@@ -368,8 +368,9 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
                 cacheManager: new CacheManager(),
                 metadataServerHealthGate: CreateHealthGate(configService));
 
-            Assert.Throws<BookNotFoundException>(() =>
+            var error = Assert.Throws<BookInfoException>(() =>
                 proxy.GetWorkInfo("hc:383404", BookMediaType.Audiobook));
+            Assert.That(error.Message, Does.Contain("Invalid V5 work response"));
         }
 
         [Test]

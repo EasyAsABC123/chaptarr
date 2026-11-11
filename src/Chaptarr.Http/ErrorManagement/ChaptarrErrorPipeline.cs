@@ -10,6 +10,7 @@ using NLog;
 using NzbDrone.Common.Serializer;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.Exceptions;
+using NzbDrone.Core.MetadataSource.BookInfo;
 
 namespace Chaptarr.Http.ErrorManagement
 {
@@ -73,6 +74,30 @@ namespace Chaptarr.Http.ErrorManagement
                     providerId = pendingMetadata.ProviderId,
                     retryAfterSeconds = pendingMetadata.RetryAfterSeconds
                 }));
+                return;
+            }
+            else if (exception is MetadataServerUnavailableException || exception is BookInfoException)
+            {
+                var retryAfter = (exception as MetadataServerUnavailableException)?.RetryAfterSeconds ?? 60;
+                response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                response.ContentType = "application/json";
+                response.Headers["Retry-After"] = retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                await response.WriteAsync(STJson.ToJson(new
+                {
+                    message = "The metadata server is temporarily unavailable. Please retry later.",
+                    code = "metadata_unavailable",
+                    retryAfterSeconds = retryAfter
+                }));
+                return;
+            }
+            else if (exception is InvalidProviderIdException || exception is NzbDrone.Core.Exceptions.BadRequestException)
+            {
+                await errorModel.WriteToResponse(response, HttpStatusCode.BadRequest);
+                return;
+            }
+            else if (exception is BookNotFoundException)
+            {
+                await errorModel.WriteToResponse(response, HttpStatusCode.NotFound);
                 return;
             }
             else if (exception is NzbDroneClientException clientException)

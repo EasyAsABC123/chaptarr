@@ -1423,9 +1423,9 @@ namespace Chaptarr.Api.V1.Books
 	                }
 	                throw;
 	            }
-            catch (BookMetadataPendingException)
+            catch (Exception error) when (error is BookMetadataPendingException || error is MetadataServerUnavailableException || error is NzbDrone.Core.MetadataSource.BookInfo.BookInfoException)
             {
-                // Expected preparation is handled by the retryable HTTP contract.
+                // Expected preparation and metadata outages use the retryable HTTP contract.
                 throw;
             }
 	            catch (Exception ex)

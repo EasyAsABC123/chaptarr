@@ -247,7 +247,7 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
             {
                 throw;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not MetadataServerUnavailableException)
             {
                 _logger.Error(ex, "Error getting author info from V5 API");
                 throw new BookInfoException("Failed to get author info from V5 API", ex);
@@ -276,7 +276,7 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
             {
                 throw;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not MetadataServerUnavailableException)
             {
                 _logger.Error(ex, "Error getting author info from V5 API (async)");
                 throw new BookInfoException("Failed to get author info from V5 API", ex);
@@ -731,22 +731,29 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
         {
             if (!_metadataServerHealthGate.TryBeginRequest(out var retryAfter))
             {
-                throw new BookInfoException("Metadata server is temporarily unavailable for {0}; retrying in {1}",
-                    operation,
-                    MetadataServerHealthGate.FormatRetryAfter(retryAfter));
+                throw new MetadataServerUnavailableException(operation, retryAfter);
             }
 
+            HttpResponse response;
             try
             {
-                var response = execute(request);
-                _metadataServerHealthGate.ReportResponse(response);
-                return response;
+                response = execute(request);
             }
             catch (Exception ex)
             {
                 _metadataServerHealthGate.ReportException(ex);
+                if (IsTemporaryMetadataFailure(ex))
+                {
+                    throw new MetadataServerUnavailableException(operation, GetMetadataFailureRetryAfter(ex), ex);
+                }
                 throw;
             }
+            _metadataServerHealthGate.ReportResponse(response);
+            if (IsTemporaryMetadataStatus(response.StatusCode))
+            {
+                throw new MetadataServerUnavailableException(operation, MetadataServerHealthGate.GetRetryAfter(response));
+            }
+            return response;
         }
 
         private HttpResponse<T> ExecuteV5Request<T>(HttpRequest request, Func<HttpRequest, HttpResponse<T>> execute, string operation)
@@ -754,44 +761,76 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
         {
             if (!_metadataServerHealthGate.TryBeginRequest(out var retryAfter))
             {
-                throw new BookInfoException("Metadata server is temporarily unavailable for {0}; retrying in {1}",
-                    operation,
-                    MetadataServerHealthGate.FormatRetryAfter(retryAfter));
+                throw new MetadataServerUnavailableException(operation, retryAfter);
             }
 
+            HttpResponse<T> response;
             try
             {
-                var response = execute(request);
-                _metadataServerHealthGate.ReportResponse(response);
-                return response;
+                response = execute(request);
             }
             catch (Exception ex)
             {
                 _metadataServerHealthGate.ReportException(ex);
+                if (IsTemporaryMetadataFailure(ex))
+                {
+                    throw new MetadataServerUnavailableException(operation, GetMetadataFailureRetryAfter(ex), ex);
+                }
                 throw;
             }
+            _metadataServerHealthGate.ReportResponse(response);
+            if (IsTemporaryMetadataStatus(response.StatusCode))
+            {
+                throw new MetadataServerUnavailableException(operation, MetadataServerHealthGate.GetRetryAfter(response));
+            }
+            return response;
         }
 
         private async Task<HttpResponse> ExecuteV5RequestAsync(HttpRequest request, Func<HttpRequest, Task<HttpResponse>> execute, string operation)
         {
             if (!_metadataServerHealthGate.TryBeginRequest(out var retryAfter))
             {
-                throw new BookInfoException("Metadata server is temporarily unavailable for {0}; retrying in {1}",
-                    operation,
-                    MetadataServerHealthGate.FormatRetryAfter(retryAfter));
+                throw new MetadataServerUnavailableException(operation, retryAfter);
             }
 
+            HttpResponse response;
             try
             {
-                var response = await execute(request);
-                _metadataServerHealthGate.ReportResponse(response);
-                return response;
+                response = await execute(request);
             }
             catch (Exception ex)
             {
                 _metadataServerHealthGate.ReportException(ex);
+                if (IsTemporaryMetadataFailure(ex))
+                {
+                    throw new MetadataServerUnavailableException(operation, GetMetadataFailureRetryAfter(ex), ex);
+                }
                 throw;
             }
+            _metadataServerHealthGate.ReportResponse(response);
+            if (IsTemporaryMetadataStatus(response.StatusCode))
+            {
+                throw new MetadataServerUnavailableException(operation, MetadataServerHealthGate.GetRetryAfter(response));
+            }
+            return response;
+        }
+
+        private static bool IsTemporaryMetadataStatus(HttpStatusCode status) =>
+            status == HttpStatusCode.TooManyRequests || status == HttpStatusCode.RequestTimeout || (int)status >= 500;
+
+        private static bool IsTemporaryMetadataFailure(Exception exception) =>
+            exception is WebException || exception is HttpRequestException || exception is TimeoutException ||
+            exception is TaskCanceledException ||
+            (exception is HttpException http && (http.Response == null || IsTemporaryMetadataStatus(http.Response.StatusCode)));
+
+        private TimeSpan? GetMetadataFailureRetryAfter(Exception exception)
+        {
+            if (exception is HttpException http && http.Response != null)
+            {
+                var declared = MetadataServerHealthGate.GetRetryAfter(http.Response);
+                if (declared.HasValue) return declared;
+            }
+            return !_metadataServerHealthGate.CanAttemptWithoutProbe(out var delay) ? delay : null;
         }
 
         private Author ConvertV5AuthorToDomain(V5.V5AuthorResponse v5Response, string originalAuthorId = null)
@@ -2149,28 +2188,10 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
 
             try
             {
-                _logger.Debug("Getting book info for foreignBookId: {0}", normalizedForeignBookId);
-
                 return PollBook(normalizedForeignBookId, mediaType, authorHintProviderId);
             }
-            catch (WebException e)
+            catch (HttpException error) when (error.Response?.StatusCode == HttpStatusCode.NotFound)
             {
-                _logger.Warn(e, "Request failure getting book info for {0}", normalizedForeignBookId);
-                throw new BookNotFoundException(normalizedForeignBookId);
-            }
-            catch (HttpException e)
-            {
-                _logger.Warn(e, "Request failure getting book info for {0}", normalizedForeignBookId);
-                throw new BookNotFoundException(normalizedForeignBookId);
-            }
-            catch (BadRequestException e)
-            {
-                _logger.Debug(e, "Bad request getting book info for {0}", normalizedForeignBookId);
-                throw new BookNotFoundException(normalizedForeignBookId);
-            }
-            catch (BookInfoException e)
-            {
-                _logger.Warn(e, "Unexpected error getting book info for {0}", normalizedForeignBookId);
                 throw new BookNotFoundException(normalizedForeignBookId);
             }
         }
@@ -2181,27 +2202,10 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
 
             try
             {
-                _logger.Debug("Getting work info for foreignWorkId: {0}", normalizedForeignWorkId);
                 return PollBook(normalizedForeignWorkId, mediaType, authorHintProviderId);
             }
-            catch (WebException e)
+            catch (HttpException error) when (error.Response?.StatusCode == HttpStatusCode.NotFound)
             {
-                _logger.Warn(e, "Request failure getting work info for {0}", normalizedForeignWorkId);
-                throw new BookNotFoundException(normalizedForeignWorkId);
-            }
-            catch (HttpException e)
-            {
-                _logger.Warn(e, "Request failure getting work info for {0}", normalizedForeignWorkId);
-                throw new BookNotFoundException(normalizedForeignWorkId);
-            }
-            catch (BadRequestException e)
-            {
-                _logger.Debug(e, "Bad request getting work info for {0}", normalizedForeignWorkId);
-                throw new BookNotFoundException(normalizedForeignWorkId);
-            }
-            catch (BookInfoException e)
-            {
-                _logger.Warn(e, "Unexpected error getting work info for {0}", normalizedForeignWorkId);
                 throw new BookNotFoundException(normalizedForeignWorkId);
             }
         }
@@ -2212,27 +2216,10 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
 
             try
             {
-                _logger.Debug("Getting edition info for foreignEditionId: {0}", normalizedForeignEditionId);
                 return PollEditionBook(normalizedForeignEditionId, mediaType);
             }
-            catch (WebException e)
+            catch (HttpException error) when (error.Response?.StatusCode == HttpStatusCode.NotFound)
             {
-                _logger.Warn(e, "Request failure getting edition info for {0}", normalizedForeignEditionId);
-                throw new BookNotFoundException(normalizedForeignEditionId);
-            }
-            catch (HttpException e)
-            {
-                _logger.Warn(e, "Request failure getting edition info for {0}", normalizedForeignEditionId);
-                throw new BookNotFoundException(normalizedForeignEditionId);
-            }
-            catch (BadRequestException e)
-            {
-                _logger.Debug(e, "Bad request getting edition info for {0}", normalizedForeignEditionId);
-                throw new BookNotFoundException(normalizedForeignEditionId);
-            }
-            catch (BookInfoException e)
-            {
-                _logger.Warn(e, "Unexpected error getting edition info for {0}", normalizedForeignEditionId);
                 throw new BookNotFoundException(normalizedForeignEditionId);
             }
         }
@@ -2519,7 +2506,7 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
                 _logger.Warn(ex, ex.Message);
                 throw new GoodreadsException("Search for '{0}' failed. Unable to communicate with Goodreads.", ex, title);
             }
-            catch (Exception ex) when (ex is not BookInfoException && ex is not BookMetadataPendingException)
+            catch (Exception ex) when (ex is not BookInfoException && ex is not BookMetadataPendingException && ex is not MetadataServerUnavailableException)
             {
                 _logger.Warn(ex, ex.Message);
                 throw new GoodreadsException("Search for '{0}' failed. Invalid response received from Goodreads.", ex, title);
@@ -3091,133 +3078,123 @@ namespace NzbDrone.Core.MetadataSource.BookInfo
                 ? AuthorIdentity.NormalizeWorkLookupAuthorHint(foreignBookId, authorHintProviderId)
                 : null;
 
-            for (var i = 0; i < 3; i++)
+            var builder = _requestBuilder.GetRequestBuilder().Create()
+                .SetSegment("route", $"api/v5/{route}/{foreignBookId}");
+
+            if (!string.IsNullOrWhiteSpace(normalizedAuthorHint))
             {
-                var builder = _requestBuilder.GetRequestBuilder().Create()
-                    .SetSegment("route", $"api/v5/{route}/{foreignBookId}");
+                builder.AddQueryParam("author", normalizedAuthorHint);
+            }
 
-                if (!string.IsNullOrWhiteSpace(normalizedAuthorHint))
+            var httpRequest = builder.Build();
+
+            httpRequest.SuppressHttpError = true;
+            httpRequest.RequestTimeout = TimeSpan.FromSeconds(30);
+
+            HttpResponse httpResponse = null;
+            try
+            {
+                // this may redirect to an author
+                httpResponse = ExecuteV5Request(httpRequest, _httpClient.Get, $"{route} lookup {foreignBookId}");
+            }
+            catch (Exception ex) when (ex is WebException || ex is HttpException)
+            {
+                throw;
+            }
+
+
+
+            if (httpResponse.StatusCode == HttpStatusCode.NotFound)
+            {
+                throw new BookNotFoundException(foreignBookId);
+            }
+
+            if (httpResponse.StatusCode == HttpStatusCode.Accepted)
+            {
+                // Accepted is asynchronous preparation, not evidence that the work is missing.
+                throw new BookMetadataPendingException(foreignBookId, MetadataServerHealthGate.GetRetryAfter(httpResponse));
+            }
+
+            if (httpResponse.StatusCode == HttpStatusCode.Conflict &&
+                string.Equals(route, "work", StringComparison.OrdinalIgnoreCase))
+            {
+                var declaredReason = httpResponse.Content?.Trim();
+                if (string.IsNullOrWhiteSpace(declaredReason))
                 {
-                    builder.AddQueryParam("author", normalizedAuthorHint);
+                    declaredReason = $"Work rescue for {foreignBookId} reached a terminal state.";
                 }
 
-                var httpRequest = builder.Build();
+                throw new WorkRescueTerminalException(foreignBookId, declaredReason);
+            }
 
-                httpRequest.SuppressHttpError = true;
-                httpRequest.RequestTimeout = TimeSpan.FromSeconds(30);
+            if (httpResponse.HasHttpRedirect)
+            {
+                var location = httpResponse.Headers.GetSingleValue("Location");
+                var split = location.Split('/').Reverse().ToList();
+                var newId = split[0];
+                var type = split[1];
 
-                HttpResponse httpResponse = null;
-                try
+                if (type == "author")
                 {
-                    // this may redirect to an author
-                    httpResponse = ExecuteV5Request(httpRequest, _httpClient.Get, $"{route} lookup {foreignBookId}");
+                    var author = PollAuthor(newId);
+                    return new V5WorkLookupResult { RedirectAuthor = author };
                 }
-                catch (Exception ex) when (ex is WebException || ex is HttpException)
+                else
                 {
-                    throw;
+                    throw new NotImplementedException($"Unexpected response from {httpResponse.Request.Url}");
                 }
+            }
 
-                if (httpResponse.StatusCode == HttpStatusCode.TooManyRequests)
+            if (httpResponse.HasHttpError)
+            {
+                if (httpResponse.StatusCode == HttpStatusCode.BadRequest)
                 {
-                    WaitUntilRetry(httpResponse);
-                    continue;
+                    throw new BadRequestException(foreignBookId);
                 }
-
-                if (httpResponse.StatusCode == HttpStatusCode.NotFound)
+                else
                 {
-                    throw new BookNotFoundException(foreignBookId);
+                    throw new BookInfoException("Unexpected response fetching book data");
                 }
+            }
 
-                if (httpResponse.StatusCode == HttpStatusCode.Accepted)
-                {
-                    // Accepted is asynchronous preparation, not evidence that the work is missing.
-                    throw new BookMetadataPendingException(foreignBookId, MetadataServerHealthGate.GetRetryAfter(httpResponse));
-                }
-
-                if (httpResponse.StatusCode == HttpStatusCode.Conflict &&
-                    string.Equals(route, "work", StringComparison.OrdinalIgnoreCase))
-                {
-                    var declaredReason = httpResponse.Content?.Trim();
-                    if (string.IsNullOrWhiteSpace(declaredReason))
-                    {
-                        declaredReason = $"Work rescue for {foreignBookId} reached a terminal state.";
-                    }
-
-                    throw new WorkRescueTerminalException(foreignBookId, declaredReason);
-                }
-
-                if (httpResponse.HasHttpRedirect)
-                {
-                    var location = httpResponse.Headers.GetSingleValue("Location");
-                    var split = location.Split('/').Reverse().ToList();
-                    var newId = split[0];
-                    var type = split[1];
-
-                    if (type == "author")
-                    {
-                        var author = PollAuthor(newId);
-                        return new V5WorkLookupResult { RedirectAuthor = author };
-                    }
-                    else
-                    {
-                        throw new NotImplementedException($"Unexpected response from {httpResponse.Request.Url}");
-                    }
-                }
-
-                    if (httpResponse.HasHttpError)
-                    {
-                        if (httpResponse.StatusCode == HttpStatusCode.BadRequest)
-                        {
-                            throw new BadRequestException(foreignBookId);
-                        }
-                        else
-                        {
-                            throw new BookInfoException("Unexpected response fetching book data");
-                        }
-                    }
-
-                // Parse V5 response format only
-                V5Resource.V5WorkResponse v5Response;
-                try
-                {
-                    v5Response = JsonConvert.DeserializeObject<V5Resource.V5WorkResponse>(httpResponse.Content, SerializerSettings);
-                }
-                catch (JsonException ex)
-                {
-                    throw new BookInfoException(
-                        "Invalid JSON returned from metadata server for {0} (status={1}, contentType='{2}', url='{3}')",
-                        ex,
-                        foreignBookId,
-                        (int)httpResponse.StatusCode,
-                        httpResponse.Headers?.ContentType ?? string.Empty,
-                        httpResponse.Request?.Url?.ToString() ?? string.Empty);
-                }
-
-                var hasWork = v5Response?.Work != null;
-                var editionsCount = v5Response?.Editions?.Count ?? 0;
-                var authorsIsNull = v5Response?.Authors == null;
-                var authorsCount = v5Response?.Authors?.Count ?? 0;
-
-                if (hasWork && editionsCount > 0 && authorsCount > 0)
-                {
-                    _logger.Debug("Successfully parsed V5 work response for {0}", foreignBookId);
-                    return new V5WorkLookupResult { WorkResponse = v5Response };
-                }
-
+            // Parse V5 response format only
+            V5Resource.V5WorkResponse v5Response;
+            try
+            {
+                v5Response = JsonConvert.DeserializeObject<V5Resource.V5WorkResponse>(httpResponse.Content, SerializerSettings);
+            }
+            catch (JsonException ex)
+            {
                 throw new BookInfoException(
-                    "Invalid V5 work response for {0} (status={1}, contentType='{2}', url='{3}', hasWork={4}, editions={5}, authorsIsNull={6}, authors={7})",
+                    "Invalid JSON returned from metadata server for {0} (status={1}, contentType='{2}', url='{3}')",
+                    ex,
                     foreignBookId,
                     (int)httpResponse.StatusCode,
                     httpResponse.Headers?.ContentType ?? string.Empty,
-                    httpResponse.Request?.Url?.ToString() ?? string.Empty,
-                    hasWork,
-                    editionsCount,
-                    authorsIsNull,
-                    authorsCount);
+                    httpResponse.Request?.Url?.ToString() ?? string.Empty);
             }
 
-            // If all retries failed, throw an exception
-            throw new BookInfoException($"Failed to get book data for {foreignBookId} after 3 attempts");
+            var hasWork = v5Response?.Work != null;
+            var editionsCount = v5Response?.Editions?.Count ?? 0;
+            var authorsIsNull = v5Response?.Authors == null;
+            var authorsCount = v5Response?.Authors?.Count ?? 0;
+
+            if (hasWork && editionsCount > 0 && authorsCount > 0)
+            {
+                _logger.Debug("Successfully parsed V5 work response for {0}", foreignBookId);
+                return new V5WorkLookupResult { WorkResponse = v5Response };
+            }
+
+            throw new BookInfoException(
+                "Invalid V5 work response for {0} (status={1}, contentType='{2}', url='{3}', hasWork={4}, editions={5}, authorsIsNull={6}, authors={7})",
+                foreignBookId,
+                (int)httpResponse.StatusCode,
+                httpResponse.Headers?.ContentType ?? string.Empty,
+                httpResponse.Request?.Url?.ToString() ?? string.Empty,
+                hasWork,
+                editionsCount,
+                authorsIsNull,
+                authorsCount);
         }
 
         private V5WorkLookupResult PollV5WorkLookup(string foreignBookId, string authorHintProviderId = null)

@@ -74,7 +74,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
             return new MetadataServerHealthGate(configService, new MetadataServerHealthService(logger), logger);
         }
 
-        private static BookInfoProxy CreateProxy(IHttpClient httpClient)
+        private static BookInfoProxy CreateProxy(IHttpClient httpClient, IMetadataServerHealthGate healthGate = null)
         {
             var configService = DispatchProxy.Create<IConfigService, ConfigServiceProxy>();
             var requestBuilder = new MetadataRequestBuilder(configService);
@@ -91,7 +91,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
                 requestBuilder: requestBuilder,
                 logger: LogManager.GetCurrentClassLogger(),
                 cacheManager: new CacheManager(),
-                metadataServerHealthGate: CreateHealthGate(configService));
+                metadataServerHealthGate: healthGate ?? CreateHealthGate(configService));
         }
 
         [Test]
@@ -227,9 +227,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
                 cacheManager: new CacheManager(),
                 metadataServerHealthGate: healthGate);
 
-            var results = proxy.SearchForNewBook("edition:123", author: null);
-
-            Assert.That(results, Is.Empty);
+            Assert.Throws<MetadataServerUnavailableException>(() => proxy.SearchForNewBook("edition:123", author: null));
             Assert.That(httpClient.Requests, Is.Empty);
         }
 
@@ -258,7 +256,7 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
                 cacheManager: new CacheManager(),
                 metadataServerHealthGate: healthGate);
 
-            var exception = Assert.Throws<BookInfoException>(() => proxy.GetAuthorInfo("hc:123", useCache: false));
+            var exception = Assert.Throws<MetadataServerUnavailableException>(() => proxy.GetAuthorInfo("hc:123", useCache: false));
 
             Assert.That(exception.Message, Does.Contain("temporarily unavailable"));
             Assert.That(httpClient.Requests, Is.Empty);
@@ -304,6 +302,120 @@ namespace Chaptarr.Core.Test.MetadataSource.BookInfo
             var proxy = CreateProxy(new RecordingHttpClient(request =>
                 new HttpResponse(request, new HttpHeader(), "null", HttpStatusCode.Accepted)));
             Assert.Throws<BookMetadataPendingException>(() => proxy.SearchForNewBook("gr:3046572", null));
+        }
+
+        [TestCase(false, HttpStatusCode.InternalServerError)]
+        [TestCase(true, HttpStatusCode.InternalServerError)]
+        [TestCase(false, HttpStatusCode.BadGateway)]
+        [TestCase(true, HttpStatusCode.ServiceUnavailable)]
+        [TestCase(false, HttpStatusCode.ServiceUnavailable)]
+        [TestCase(true, HttpStatusCode.GatewayTimeout)]
+        [TestCase(false, HttpStatusCode.TooManyRequests)]
+        [TestCase(true, HttpStatusCode.TooManyRequests)]
+        [TestCase(false, HttpStatusCode.RequestTimeout)]
+        public void should_defer_temporary_metadata_status_without_claiming_the_book_is_missing(bool work, HttpStatusCode status)
+        {
+            var client = new RecordingHttpClient(request =>
+            {
+                var headers = new HttpHeader { ContentType = "application/json" };
+                headers["Retry-After"] = "120";
+                return new HttpResponse(request, headers, "unavailable", status);
+            });
+            var proxy = CreateProxy(client);
+            var error = Assert.Throws<MetadataServerUnavailableException>(() =>
+            {
+                if (work) proxy.GetWorkInfo("gr:3046572");
+                else proxy.GetBookInfo("gr:3046572");
+            });
+            Assert.That(error.RetryAfterSeconds, Is.EqualTo(120));
+            Assert.That(client.Requests.Count, Is.EqualTo(1), "The durable caller owns retry scheduling.");
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void should_preserve_transport_timeouts_instead_of_missing_work(bool work)
+        {
+            foreach (var failure in new Exception[] {
+                new WebException("timeout", WebExceptionStatus.Timeout),
+                new TimeoutException("metadata timeout"),
+                new System.Threading.Tasks.TaskCanceledException("request timed out"),
+                new System.Net.Http.HttpRequestException("connection reset") })
+            {
+                var client = new RecordingHttpClient(_ => throw failure);
+                var proxy = CreateProxy(client);
+                var error = Assert.Throws<MetadataServerUnavailableException>(() =>
+                {
+                    if (work) proxy.GetWorkInfo("gr:3046572");
+                    else proxy.GetBookInfo("gr:3046572");
+                });
+                Assert.That(error.InnerException, Is.SameAs(failure));
+                Assert.That(client.Requests.Count, Is.EqualTo(1));
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void should_defer_gate_cooldown_without_contacting_upstream_and_recover_when_ready(bool work)
+        {
+            var config = DispatchProxy.Create<IConfigService, ConfigServiceProxy>();
+            var gate = CreateHealthGate(config);
+            var headers = new HttpHeader();
+            headers["Retry-After"] = "120";
+            gate.ReportResponse(new HttpResponse(new HttpRequest("http://metadata/fixture"), headers, "", HttpStatusCode.TooManyRequests));
+            var client = new RecordingHttpClient(request => new HttpResponse(request, new HttpHeader { ContentType = "application/json" }, GoodreadsWorkPayload, HttpStatusCode.OK));
+            var proxy = CreateProxy(client, gate);
+            var error = Assert.Throws<MetadataServerUnavailableException>(() =>
+            {
+                if (work) proxy.GetWorkInfo("gr:3046572");
+                else proxy.GetBookInfo("gr:3046572");
+            });
+            Assert.That(error.RetryAfterSeconds, Is.InRange(115, 120));
+            Assert.That(client.Requests, Is.Empty);
+            gate.Reset();
+            Assert.That(work ? proxy.GetWorkInfo("gr:3046572").Item2 : proxy.GetBookInfo("gr:3046572").Item2, Is.Not.Null);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void should_preserve_malformed_metadata_as_an_unavailable_response(bool work)
+        {
+            foreach (var payload in new[] { "not json", "{}" })
+            {
+                var proxy = CreateProxy(new RecordingHttpClient(request => new HttpResponse(request, new HttpHeader(), payload, HttpStatusCode.OK)));
+                Assert.Throws<BookInfoException>(() =>
+                {
+                    if (work) proxy.GetWorkInfo("gr:3046572");
+                    else proxy.GetBookInfo("gr:3046572");
+                });
+            }
+        }
+
+        [Test]
+        public void should_keep_invalid_and_missing_identities_distinct_from_an_outage()
+        {
+            var client = new RecordingHttpClient(request => new HttpResponse(request, new HttpHeader(), "", HttpStatusCode.NotFound));
+            var proxy = CreateProxy(client);
+            Assert.Throws<InvalidOperationException>(() => proxy.GetBookInfo("3046572"));
+            Assert.That(client.Requests, Is.Empty);
+            Assert.Throws<BookNotFoundException>(() => proxy.GetBookInfo("gr:3046572"));
+            Assert.Throws<BookNotFoundException>(() => proxy.GetWorkInfo("gr:3046572"));
+            Assert.Throws<BookNotFoundException>(() => proxy.GetEditionInfo("gr:3046572"));
+        }
+
+        [Test]
+        public void should_keep_http_exception_outages_retryable_for_edition_lookup_and_search()
+        {
+            foreach (var search in new[] { false, true })
+            {
+                var client = new RecordingHttpClient(request => throw new HttpException(
+                    new HttpResponse(request, new HttpHeader(), "unavailable", HttpStatusCode.ServiceUnavailable)));
+                var proxy = CreateProxy(client);
+                Assert.Throws<MetadataServerUnavailableException>(() =>
+                {
+                    if (search) proxy.SearchForNewBook("gr:3046572", null);
+                    else proxy.GetEditionInfo("gr:3046572");
+                });
+            }
         }
 
         [Test]
