@@ -29,6 +29,7 @@ namespace NzbDrone.Core.Books
         // Bounded striped locks protect concurrent first-book adds for the same author.
         private static readonly object[] SingleWorkLocks = Enumerable.Range(0, 64).Select(_ => new object()).ToArray();
         private readonly IPendingAuthorImportService _pendingImportService;
+        private readonly IVerifiedGoodreadsWorkService _verifiedGoodreads;
         private readonly IAuthorService _authorService;
         private readonly IAuthorLibraryService _authorLibraryService;
         private readonly IBookService _bookService;
@@ -64,9 +65,11 @@ namespace NzbDrone.Core.Books
                                IEditionMetadataProfileFilter editionMetadataProfileFilter,
                                IMetadataProfileService metadataProfileService,
                                Logger logger,
-                               IPendingAuthorImportService pendingImportService = null)
+                               IPendingAuthorImportService pendingImportService = null,
+                               IVerifiedGoodreadsWorkService verifiedGoodreads = null)
         {
             _pendingImportService = pendingImportService;
+            _verifiedGoodreads = verifiedGoodreads;
             _authorService = authorService;
             _authorLibraryService = authorLibraryService;
             _bookService = bookService;
@@ -474,7 +477,33 @@ namespace NzbDrone.Core.Books
             }
 
             // Resolve only this work; never request an author's catalog to add a book.
-            var metadata = _bookInfo.GetBookInfo(workId, request.MediaType, authorId);
+            Tuple<string, Book, List<Author>> metadata;
+            try
+            {
+                metadata = _bookInfo.GetBookInfo(workId, request.MediaType, authorId);
+            }
+            catch (Exception error) when (_verifiedGoodreads != null &&
+                (error is BookMetadataPendingException || error is MetadataServerUnavailableException ||
+                 error is NzbDrone.Core.MetadataSource.BookInfo.BookInfoException) &&
+                _bookService.FindByProviderId(workId.Split(':')[0], workId, request.MediaType) == null)
+            {
+                var verified = _verifiedGoodreads.Resolve(request, workId, authorId);
+                if (verified == null) throw;
+                // Run the same profile and retention owners before creating even an author row.
+                var verifiedAuthor = verified.Author;
+                verified.Author = request.Author;
+                var retained = SelectRetainedEditionsForAdd(verified, verified.Editions);
+                var pinned = (request.Editions ?? new List<Edition>()).Where(x => x.ManualAdd && x.Monitored)
+                    .SelectMany(BookEditionIdentity.GetEditionProviderIds).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (!retained.Any() || (pinned.Any() && !retained.SelectMany(BookEditionIdentity.GetEditionProviderIds).Any(pinned.Contains)))
+                {
+                    _logger.Debug("Verified Goodreads work {0} does not satisfy saved profile/edition policy; retaining original metadata retry", workId);
+                    throw;
+                }
+                verified.Editions = retained;
+                verified.Author = verifiedAuthor;
+                metadata = Tuple.Create(authorId, verified, new List<Author> { verifiedAuthor });
+            }
             var book = metadata?.Item2;
             if (book == null || book.Editions?.Any() != true ||
                 !WorkIdMatcher.CrossFormatSafeMatches(request, book))

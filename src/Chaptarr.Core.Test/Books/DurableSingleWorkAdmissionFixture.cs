@@ -43,6 +43,7 @@ namespace Chaptarr.Core.Test.Books
             public Exception Failure = new BookMetadataPendingException("gr:42");
             public Action DuringFetch;
             public bool FailSearch;
+            public IVerifiedGoodreadsWorkService Verified;
             public AddBookService Add;
             public PendingAuthorImportService Pending;
             public ProcessPendingImportsCommandHandler Worker;
@@ -99,7 +100,7 @@ namespace Chaptarr.Core.Test.Books
                 var exclusions = Stub<IImportListExclusionService>((m,a) => m.Name == "FindByForeignId" ? new List<ImportListExclusion>() : null);
                 var profiles = Stub<IMetadataProfileService>((m,a) => m.Name == "Exists" ? (object)true : new MetadataProfile { Id = 1, AllowedLanguages = "eng" });
                 var searches = Stub<IBookAddedService>((m,a) => { Assert.That(m.Name, Is.EqualTo("SearchForBook")); Searches.Add((int)a[0]); Books.Single(x => x.Id == (int)a[0]).AddOptions.SearchForNewBook = false; return null; });
-                Add = new AddBookService(_authors, Stub<IAuthorLibraryService>(), _books, Stub<IBookMonitoredService>(), searches, _info, exclusions, Stub<ISeriesBookLinkService>(), Stub<ISeriesService>(), Stub<IProvideAuthorInfo>(), Stub<IBuildFileNames>(), Stub<IMonitoringService>(), Stub<IEditionService>(), new EditionSelector(LogManager.GetCurrentClassLogger()), new EditionMetadataProfileFilter(new TestTermMatcherService()), profiles, LogManager.GetCurrentClassLogger(), Pending);
+                Add = new AddBookService(_authors, Stub<IAuthorLibraryService>(), _books, Stub<IBookMonitoredService>(), searches, _info, exclusions, Stub<ISeriesBookLinkService>(), Stub<ISeriesService>(), Stub<IProvideAuthorInfo>(), Stub<IBuildFileNames>(), Stub<IMonitoringService>(), Stub<IEditionService>(), new EditionSelector(LogManager.GetCurrentClassLogger()), new EditionMetadataProfileFilter(new TestTermMatcherService()), profiles, LogManager.GetCurrentClassLogger(), Pending, Verified);
                 Worker = new ProcessPendingImportsCommandHandler(Pending, Stub<IAuthorLibraryService>(), _authors, _books, _info, Stub<IManageCommandQueue>((m,a) => {
                     if (FailSearch) throw new InvalidOperationException("Command queue unavailable");
                     Searches.AddRange(((BookSearchCommand)a[0]).BookIds);
@@ -109,11 +110,85 @@ namespace Chaptarr.Core.Test.Books
             public Book Request(BookMediaType format = BookMediaType.Ebook, string id = "gr:42")
             {
                 var request = new Book { Title = "Requested", GoodreadsWorkId = id, MediaType = format, AnyEditionOk = false,
-                    Author = new Author { GoodreadsAuthorId = "gr:7", Name = "Requested Author", AddOptions = new AddAuthorOptions { Monitor = MonitorTypes.SpecificBook }, EbookMetadataProfileId = 1, AudiobookMetadataProfileId = 1, EbookQualityProfileId = 2, AudiobookQualityProfileId = 3, EbookRootFolderPath = "/ebooks", AudiobookRootFolderPath = "/audio", Tags = new HashSet<int> { 8 }, EbookTags = new HashSet<int> { 9 } },
+                    Author = new Author { GoodreadsAuthorId = Author.GoodreadsAuthorId, Name = "Requested Author", AddOptions = new AddAuthorOptions { Monitor = MonitorTypes.SpecificBook }, EbookMetadataProfileId = 1, AudiobookMetadataProfileId = 1, EbookQualityProfileId = 2, AudiobookQualityProfileId = 3, EbookRootFolderPath = "/ebooks", AudiobookRootFolderPath = "/audio", Tags = new HashSet<int> { 8 }, EbookTags = new HashSet<int> { 9 } },
                     Editions = new List<Edition> { new Edition { ForeignEditionId = "gr:77", ManualAdd = true, Monitored = true } }, AddOptions = new AddBookOptions { SearchForNewBook = true } };
                 request.SetMonitored(true); return request;
             }
             public void Process() { foreach (var row in Rows.Where(x => x.IsActive())) row.NextAttemptAt = DateTime.UtcNow.AddSeconds(-1); Worker.Execute(new ProcessPendingImportsCommand()); }
+        }
+
+        [TestCase("47168622", "27130746", "14694702")]
+        [TestCase("98976523", "63884705", "49899833")]
+        public void queued_request_materializes_verified_independent_work_without_waiting_for_v5(string work, string edition, string author)
+        {
+            var h = new Harness(); h.Author.GoodreadsAuthorId = "gr:" + author;
+            var request = h.Request(id: "gr:" + work); request.AnyEditionOk = true;
+            request.Editions.Single().ForeignEditionId = "gr:" + edition; request.Editions.Single().ManualAdd = false;
+            Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(request));
+            h.Verified = VerifiedGoodreadsWorkFixture.Create(work, edition, author); h.Restart(); h.Process();
+            Assert.That(h.Rows, Is.Empty); var added = h.Books.Single();
+            Assert.That(added.GoodreadsWorkId, Is.EqualTo("gr:" + work));
+            Assert.That(added.Editions.Single().ReadingFormatId, Is.EqualTo(1)); Assert.That(added.Editions.Single().IsEbook, Is.False);
+            Assert.That(added.Editions.Single().Language, Is.EqualTo("eng")); Assert.That(added.IsMonitored(), Is.True);
+            Assert.That(h.Searches, Is.EqualTo(new[] { added.Id }));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task independent_metadata_can_complete_initial_add_without_synthetic_queue_or_library_rows(bool unavailable)
+        {
+            var h = new Harness { Verified = VerifiedGoodreadsWorkFixture.Create() };
+            if (unavailable) h.Failure = new MetadataServerUnavailableException("work");
+            h.Restart(); var book = await h.Add.AddBook(h.Request());
+            Assert.That(book.Id, Is.GreaterThan(0)); Assert.That(h.Rows, Is.Empty);
+            Assert.That(h.Books.Count, Is.EqualTo(1)); Assert.That(h.Searches, Is.EqualTo(new[] { book.Id }));
+        }
+
+        [TestCase("43", "77", "7", "Paperback", System.Net.HttpStatusCode.OK)]
+        [TestCase("42", "78", "7", "Paperback", System.Net.HttpStatusCode.OK)]
+        [TestCase("42", "77", "8", "Paperback", System.Net.HttpStatusCode.OK)]
+        [TestCase("42", "77", "7", "Unknown", System.Net.HttpStatusCode.OK)]
+        [TestCase("42", "77", "7", "Paperback", System.Net.HttpStatusCode.ServiceUnavailable)]
+        public void independent_source_failure_or_mismatch_keeps_native_pending_without_any_library_writes(string work, string edition, string author, string format, System.Net.HttpStatusCode status)
+        {
+            var h = new Harness { Verified = VerifiedGoodreadsWorkFixture.Create(work, edition, author, format, status: status) }; h.Restart();
+            Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(h.Request()));
+            h.Process(); Assert.That(h.Rows.Single().IsActive(), Is.True);
+            Assert.That(h.Author.Id, Is.Zero); Assert.That(h.Books, Is.Empty); Assert.That(h.Searches, Is.Empty);
+        }
+
+        [Test]
+        public void cancellation_during_independent_metadata_fetch_is_fenced_before_materialization()
+        {
+            var h = new Harness();
+            var id = Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(h.Request())).PendingId;
+            h.Verified = VerifiedGoodreadsWorkFixture.Create(observed: _ => h.Pending.Cancel(id)); h.Restart(); h.Process();
+            Assert.That(h.Rows.Single().LastError, Is.EqualTo("Cancelled by user"));
+            Assert.That(h.Author.Id, Is.Zero); Assert.That(h.Books, Is.Empty); Assert.That(h.Searches, Is.Empty);
+        }
+
+        [TestCase("fra", "77")]
+        [TestCase("eng", "999")]
+        public void filtered_profile_or_incompatible_pin_retains_pending_without_library_writes(string language, string pin)
+        {
+            var h = new Harness(); h.Verified = VerifiedGoodreadsWorkFixture.Create(language: language); h.Restart();
+            var request = h.Request();
+            if (pin != "77") request.Editions.Add(new Edition { ForeignEditionId = "gr:" + pin, ManualAdd = true, Monitored = true });
+            if (pin != "77") { request.Editions[0].ManualAdd = false; request.Editions[0].Monitored = false; }
+            Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(request));
+            Assert.That(h.Books, Is.Empty); Assert.That(h.Author.Id, Is.Zero); Assert.That(h.Searches, Is.Empty);
+        }
+
+        [Test]
+        public async Task healthy_v5_and_real_missing_do_not_call_independent_fallback()
+        {
+            var h = new Harness { Failure = null };
+            h.Verified = Stub<IVerifiedGoodreadsWorkService>(); h.Restart();
+            Assert.That((await h.Add.AddBook(h.Request())).Id, Is.GreaterThan(0));
+            h.Failure = new BookMetadataPendingException("gr:42");
+            Assert.That((await h.Add.ReplaySingleWork(h.Request(), () => true)).Id, Is.GreaterThan(0));
+            h = new Harness { Failure = new BookNotFoundException("gr:42"), Verified = Stub<IVerifiedGoodreadsWorkService>() }; h.Restart();
+            Assert.ThrowsAsync<BookNotFoundException>(() => h.Add.AddBook(h.Request())); Assert.That(h.Rows, Is.Empty);
         }
 
         [TestCase(false)]
