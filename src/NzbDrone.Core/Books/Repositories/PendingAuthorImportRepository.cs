@@ -11,11 +11,14 @@ namespace NzbDrone.Core.Books
     {
         PendingAuthorImport GetByProviderId(string providerId);
         PendingAuthorImport GetActiveByProviderId(string providerId);
+        PendingAuthorImport GetActiveByRequestKey(string key);
         List<PendingAuthorImport> GetDueForProcessing(DateTime cutoff, int limit);
         List<PendingAuthorImport> GetByStatus(PendingImportStatus status);
         List<PendingAuthorImport> GetAll();
         bool TryUpdateRequest(PendingAuthorImport item, long expectedVersion);
         bool TryDelete(int id, long expectedVersion);
+        bool TryClaimSingleWork(PendingAuthorImport item, DateTime now);
+        void ReleaseSingleWorkClaim(PendingAuthorImport item);
         void DeleteOldCompleted(DateTime cutoff);
     }
 
@@ -35,16 +38,20 @@ namespace NzbDrone.Core.Books
 
         public PendingAuthorImport GetActiveByProviderId(string providerId)
         {
-            return Query(x => x.ProviderId == providerId &&
+            return Query(x => x.ProviderId == providerId && !x.SingleWorkOnly &&
                             (x.OverallStatus == PendingImportStatus.Pending ||
                              x.OverallStatus == PendingImportStatus.InProgress ||
                              x.OverallStatus == PendingImportStatus.Retrying))
                 .FirstOrDefault();
         }
 
+        public PendingAuthorImport GetActiveByRequestKey(string key) => Query(x => x.RequestKey == key &&
+            (x.OverallStatus == PendingImportStatus.Pending || x.OverallStatus == PendingImportStatus.InProgress || x.OverallStatus == PendingImportStatus.Retrying)).FirstOrDefault();
+
         public List<PendingAuthorImport> GetDueForProcessing(DateTime cutoff, int limit)
         {
             return Query(x => x.NextAttemptAt <= cutoff &&
+                            (!x.SingleWorkOnly || x.LeaseExpiresAt == null || x.LeaseExpiresAt <= cutoff) &&
                             (x.OverallStatus == PendingImportStatus.Pending ||
                              x.OverallStatus == PendingImportStatus.Retrying))
                 .OrderBy(x => x.NextAttemptAt)
@@ -68,7 +75,10 @@ namespace NzbDrone.Core.Books
 
             const string sql = @"
                 UPDATE ""PendingAuthorImport""
-                   SET ""DiscoveredAuthorFolderPath"" = @DiscoveredAuthorFolderPath,
+                   SET ""RequestKey"" = @RequestKey,
+                       ""SingleWorkOnly"" = @SingleWorkOnly,
+                       ""SingleWorkRequests"" = @SingleWorkRequests,
+                       ""DiscoveredAuthorFolderPath"" = @DiscoveredAuthorFolderPath,
                        ""AudiobookStatus"" = @AudiobookStatus,
                        ""EbookStatus"" = @EbookStatus,
                        ""OverallStatus"" = @OverallStatus,
@@ -106,6 +116,9 @@ namespace NzbDrone.Core.Books
             using var connection = _database.OpenConnection();
             return connection.Execute(sql, new
             {
+                item.RequestKey,
+                item.SingleWorkOnly,
+                item.SingleWorkRequests,
                 item.DiscoveredAuthorFolderPath,
                 item.AudiobookStatus,
                 item.EbookStatus,
@@ -141,6 +154,27 @@ namespace NzbDrone.Core.Books
                 item.Id,
                 ExpectedVersion = expectedVersion
             }) == 1;
+        }
+
+        public bool TryClaimSingleWork(PendingAuthorImport item, DateTime now)
+        {
+            var token = Guid.NewGuid().ToString("N");
+            using var connection = _database.OpenConnection();
+            var claimed = connection.Execute(@"UPDATE ""PendingAuthorImport""
+                SET ""LockedBy"" = @Token, ""LockedAt"" = @Now, ""LeaseExpiresAt"" = @Expires
+                WHERE ""Id"" = @Id AND ""Version"" = @Version AND ""SingleWorkOnly"" = @SingleWorkOnly
+                AND ""OverallStatus"" IN (1, 3) AND ""NextAttemptAt"" <= @Now
+                AND (""LeaseExpiresAt"" IS NULL OR ""LeaseExpiresAt"" <= @Now)",
+                new { Token = token, Now = now, Expires = now.AddMinutes(30), item.Id, item.Version, SingleWorkOnly = true }) == 1;
+            if (claimed) item.LockedBy = token;
+            return claimed;
+        }
+
+        public void ReleaseSingleWorkClaim(PendingAuthorImport item)
+        {
+            using var connection = _database.OpenConnection();
+            connection.Execute(@"UPDATE ""PendingAuthorImport"" SET ""LockedBy"" = NULL, ""LockedAt"" = NULL, ""LeaseExpiresAt"" = NULL
+                WHERE ""Id"" = @Id AND ""LockedBy"" = @LockedBy", new { item.Id, item.LockedBy });
         }
 
         public bool TryDelete(int id, long expectedVersion)

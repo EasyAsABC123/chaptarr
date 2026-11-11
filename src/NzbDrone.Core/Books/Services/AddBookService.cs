@@ -20,6 +20,7 @@ namespace NzbDrone.Core.Books
     public interface IAddBookService
     {
         Task<Book> AddBook(Book book, bool doRefresh = true);
+        Task<Book> ReplaySingleWork(Book book, Func<bool> isCurrent);
         Task<List<Book>> AddBooks(List<Book> books, bool doRefresh = true);
     }
 
@@ -27,6 +28,7 @@ namespace NzbDrone.Core.Books
     {
         // Bounded striped locks protect concurrent first-book adds for the same author.
         private static readonly object[] SingleWorkLocks = Enumerable.Range(0, 64).Select(_ => new object()).ToArray();
+        private readonly IPendingAuthorImportService _pendingImportService;
         private readonly IAuthorService _authorService;
         private readonly IAuthorLibraryService _authorLibraryService;
         private readonly IBookService _bookService;
@@ -61,8 +63,10 @@ namespace NzbDrone.Core.Books
                                IEditionSelector editionSelector,
                                IEditionMetadataProfileFilter editionMetadataProfileFilter,
                                IMetadataProfileService metadataProfileService,
-                               Logger logger)
+                               Logger logger,
+                               IPendingAuthorImportService pendingImportService = null)
         {
+            _pendingImportService = pendingImportService;
             _authorService = authorService;
             _authorLibraryService = authorLibraryService;
             _bookService = bookService;
@@ -406,13 +410,61 @@ namespace NzbDrone.Core.Books
             return _authorService.GetAuthor(author.Id) ?? author;
         }
 
-        private Task<Book> RequestSingleWork(Book request)
+        public Task<Book> ReplaySingleWork(Book request, Func<bool> isCurrent)
+        {
+            // The persisted pending intent owns search dispatch until durable command enqueue succeeds.
+            request.AddOptions ??= new AddBookOptions();
+            request.AddOptions.SearchForNewBook = false;
+            return InsertSingleWork(request, isCurrent);
+        }
+
+        private async Task<Book> RequestSingleWork(Book request, bool queueIfUnavailable = true)
+        {
+            try
+            {
+                return await InsertSingleWork(request);
+            }
+            catch (Exception error) when (queueIfUnavailable && _pendingImportService != null &&
+                (error is BookMetadataPendingException || error is MetadataServerUnavailableException ||
+                 error is NzbDrone.Core.MetadataSource.BookInfo.BookInfoException))
+            {
+                var workId = ResolveRequestedWorkProviderId(request);
+                var authorId = GetAuthorProviderId(request.Author);
+                var config = BuildRequestedBookMonitoringConfig(request, new List<string> { workId }, request.AddOptions?.SearchForNewBook == true);
+                config.SingleWorkRequest = PendingSingleWorkRequest.Create(request, workId, authorId, config);
+                var pendingId = await _pendingImportService.EnqueueAsync(authorId, config, "book");
+                if (pendingId <= 0) throw new InvalidOperationException("Pending single-work request was not persisted.");
+                throw new PendingBookRequestException(pendingId);
+            }
+        }
+
+        private Task<Book> InsertSingleWork(Book request, Func<bool> isCurrent = null)
         {
             var workId = ResolveRequestedWorkProviderId(request);
             var authorId = GetAuthorProviderId(request.Author);
             if (string.IsNullOrWhiteSpace(workId) || string.IsNullOrWhiteSpace(authorId))
             {
                 throw new ValidationException(new[] { new ValidationFailure("ForeignBookId", "A single-book request requires work and author provider IDs.") });
+            }
+
+            if (ResolveMetadataProfile(request.Author, request.MediaType) == null)
+                throw new ValidationException(new[] { new ValidationFailure("MetadataProfile", "A valid metadata profile is required for the requested format.") });
+
+            // A completed materialization is replay-safe even if metadata is temporarily unavailable again.
+            if (isCurrent != null)
+            {
+                var parts = workId.Split(new[] { ':' }, 2);
+                var existing = _bookService.FindByProviderId(parts[0], workId, request.MediaType);
+                if (existing?.Id > 0 && existing.Editions?.Any(x => x.Id > 0) == true &&
+                    (!request.IsMonitored() || existing.IsMonitored()) && existing.AnyEditionOk == request.AnyEditionOk &&
+                    existing.WantedNarratorId == request.WantedNarratorId &&
+                    (request.Editions?.Where(x => x.ManualAdd && x.Monitored).Any() != true ||
+                     existing.Editions.Where(x => x.ManualAdd && x.Monitored).SelectMany(BookEditionIdentity.GetEditionProviderIds)
+                        .Intersect(request.Editions.Where(x => x.ManualAdd && x.Monitored).SelectMany(BookEditionIdentity.GetEditionProviderIds), StringComparer.OrdinalIgnoreCase).Any()))
+                {
+                    if (!isCurrent()) throw new OperationCanceledException("Pending single-work request changed.");
+                    return Task.FromResult(existing);
+                }
             }
 
             // Resolve only this work; never request an author's catalog to add a book.
@@ -425,6 +477,10 @@ namespace NzbDrone.Core.Books
             }
 
             var requestedEditionIds = GetRequestedEditionProviderIdsFromPayload(request.Editions);
+            var requestedPinnedIds = (request.Editions ?? new List<Edition>()).Where(x => x.ManualAdd && x.Monitored)
+                .SelectMany(BookEditionIdentity.GetEditionProviderIds).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (requestedPinnedIds.Any() && !book.Editions.SelectMany(BookEditionIdentity.GetEditionProviderIds).Any(requestedPinnedIds.Contains))
+                throw new NzbDrone.Core.MetadataSource.BookInfo.BookInfoException("Requested pinned edition metadata is not yet available.");
             var requestedAuthor = request.Author;
             var remoteAuthor = book.Author ?? metadata.Item3?.FirstOrDefault();
             if (remoteAuthor == null)
@@ -435,6 +491,7 @@ namespace NzbDrone.Core.Books
             var lockKey = GetAuthorProviderId(remoteAuthor) ?? authorId;
             lock (SingleWorkLocks[(int)((uint)StringComparer.OrdinalIgnoreCase.GetHashCode(lockKey) % (uint)SingleWorkLocks.Length)])
             {
+                if (isCurrent != null && !isCurrent()) throw new OperationCanceledException("Pending single-work request changed.");
                 // Preserve requested profiles/roots/monitoring while taking authoritative author identity.
                 requestedAuthor.UseMetadataFrom(remoteAuthor);
                 book.Author = requestedAuthor;
@@ -442,6 +499,17 @@ namespace NzbDrone.Core.Books
                 var parts = workId.Split(new[] { ':' }, 2);
                 if (_bookService.FindByProviderId(parts[0], workId, request.MediaType) != null)
                 {
+                    if (isCurrent != null)
+                    {
+                        if (!isCurrent()) throw new OperationCanceledException("Pending single-work request changed.");
+                        // Update an existing exact work from authoritative editions while preserving the saved pin.
+                        request.Editions = book.Editions;
+                        foreach (var edition in request.Editions)
+                        {
+                            edition.ManualAdd = BookEditionIdentity.GetEditionProviderIds(edition).Any(requestedPinnedIds.Contains);
+                            edition.Monitored = BookEditionIdentity.GetEditionProviderIds(edition).Any(requestedEditionIds.Contains);
+                        }
+                    }
                     return AddBook(request, doRefresh: false);
                 }
                 if (author == null)
@@ -499,7 +567,7 @@ namespace NzbDrone.Core.Books
                 RemoveMatchingImportListExclusions(book);
                 // Metadata is already resolved. BookAddedHandler must not refresh the author.
                 var added = _bookService.AddBook(book, doRefresh: false);
-                if (book.AddOptions.SearchForNewBook)
+                if (book.AddOptions.SearchForNewBook && (isCurrent == null || isCurrent()))
                 {
                     _bookAddedService.SearchForBook(added.Id);
                 }

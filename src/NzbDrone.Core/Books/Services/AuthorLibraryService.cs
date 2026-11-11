@@ -86,6 +86,10 @@ namespace NzbDrone.Core.Books.Services
         // FOLDER-PRESERVATION: Discovered author folder path to preserve existing structure
         public string DiscoveredAuthorFolderPath { get; set; }
 
+        // Exact single-work requests retain admission payloads through metadata outages.
+        [Newtonsoft.Json.JsonIgnore]
+        public PendingSingleWorkRequest SingleWorkRequest { get; set; }
+
         // Pending import support
         public bool QueueIfUnavailable { get; set; } = false;
         public bool IsFromQueue { get; set; } = false;  // Prevents re-queuing when processing from queue

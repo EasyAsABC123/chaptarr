@@ -90,6 +90,29 @@ namespace Chaptarr.Core.Test.Books
             });
         }
 
+        [Test]
+        public void single_work_claims_are_exclusive_recover_expired_leases_and_fence_cancelled_snapshots()
+        {
+            WithCasRepository((repository, cs) =>
+            {
+                using var db = new SqliteConnection(cs); db.Open();
+                db.Execute("UPDATE PendingAuthorImport SET SingleWorkOnly=1,RequestKey='exact',NextAttemptAt=@Now", new { Now = DateTime.UtcNow.AddMinutes(-1) });
+                var item = new PendingAuthorImport { Id = 1, Version = 4, SingleWorkOnly = true };
+                var stale = new PendingAuthorImport { Id = 1, Version = 4, SingleWorkOnly = true };
+                var now = DateTime.UtcNow;
+                Assert.That(repository.TryClaimSingleWork(item, now), Is.True);
+                Assert.That(repository.TryClaimSingleWork(stale, now), Is.False);
+                db.Execute("UPDATE PendingAuthorImport SET LeaseExpiresAt=@Past", new { Past = now.AddSeconds(-1) });
+                Assert.That(repository.TryClaimSingleWork(stale, now), Is.True);
+                repository.ReleaseSingleWorkClaim(item);
+                Assert.That(db.ExecuteScalar<string>("SELECT LockedBy FROM PendingAuthorImport"), Is.EqualTo(stale.LockedBy));
+                db.Execute("UPDATE PendingAuthorImport SET OverallStatus=6,Version=5");
+                Assert.That(repository.TryDelete(1, item.Version), Is.False);
+                repository.ReleaseSingleWorkClaim(stale);
+                Assert.That(repository.TryClaimSingleWork(item, now), Is.False);
+            });
+        }
+
         private static void WithCasRepository(Action<PendingAuthorImportRepository, string> action)
         {
             var databasePath = Path.Combine(TestContext.CurrentContext.WorkDirectory, $"pending_author_cas_{Guid.NewGuid():N}.db");
@@ -109,6 +132,12 @@ namespace Chaptarr.Core.Test.Books
                         CREATE TABLE ""PendingAuthorImport"" (
                             ""Id"" INTEGER PRIMARY KEY,
                             ""ProviderId"" TEXT,
+                            ""RequestKey"" TEXT,
+                            ""SingleWorkOnly"" INTEGER,
+                            ""SingleWorkRequests"" TEXT,
+                            ""LockedBy"" TEXT,
+                            ""LockedAt"" DATETIME,
+                            ""LeaseExpiresAt"" DATETIME,
                             ""DiscoveredAuthorFolderPath"" TEXT,
                             ""AudiobookStatus"" INTEGER,
                             ""EbookStatus"" INTEGER,
@@ -191,6 +220,12 @@ namespace Chaptarr.Core.Test.Books
                         CREATE TABLE ""PendingAuthorImport"" (
                             ""Id"" INTEGER PRIMARY KEY,
                             ""ProviderId"" TEXT,
+                            ""RequestKey"" TEXT,
+                            ""SingleWorkOnly"" INTEGER,
+                            ""SingleWorkRequests"" TEXT,
+                            ""LockedBy"" TEXT,
+                            ""LockedAt"" DATETIME,
+                            ""LeaseExpiresAt"" DATETIME,
                             ""NextAttemptAt"" DATETIME,
                             ""OverallStatus"" INTEGER,
                             ""AttemptCount"" INTEGER,

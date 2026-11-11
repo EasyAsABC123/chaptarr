@@ -19,10 +19,13 @@ namespace NzbDrone.Core.Books.Services
 {
     public interface IPendingAuthorImportService
     {
+        bool TryBeginSingleWork(PendingAuthorImport item) => false;
+        void ReleaseSingleWork(PendingAuthorImport item) { }
         Task<int> EnqueueAsync(string providerId, MonitoringConfig config, string sourceApplication);
         List<PendingAuthorImport> GetAll();
         List<PendingAuthorImport> GetDueForProcessing(int limit = 10);
         PendingAuthorImport GetByProviderId(string providerId);
+        PendingAuthorImport GetById(int id) => null;
         void UpdateStatus(PendingAuthorImport item, PendingImportStatus status, string error);
         void ScheduleRetry(PendingAuthorImport item, string error);
         void Cancel(int id);
@@ -55,6 +58,9 @@ namespace NzbDrone.Core.Books.Services
             _logger = logger;
         }
 
+        public bool TryBeginSingleWork(PendingAuthorImport item) => _repository.TryClaimSingleWork(item, DateTime.UtcNow);
+        public void ReleaseSingleWork(PendingAuthorImport item) => _repository.ReleaseSingleWorkClaim(item);
+
         public Task<int> EnqueueAsync(string providerId, MonitoringConfig config, string sourceApplication)
         {
             // Normalize and validate provider ID
@@ -65,6 +71,7 @@ namespace NzbDrone.Core.Books.Services
             }
 
             config ??= new MonitoringConfig();
+            var requestKey = config.SingleWorkRequest?.GetRequestKey() ?? providerId;
             var incomingAudiobookTags = ResolveMediaTags(config.CreateAudiobook, config.AudiobookTags, config.Tags);
             var incomingEbookTags = ResolveMediaTags(config.CreateEbook, config.EbookTags, config.Tags);
 
@@ -92,13 +99,37 @@ namespace NzbDrone.Core.Books.Services
             while (true)
             {
                 // Check for existing active pending
-                var existing = _repository.GetActiveByProviderId(providerId);
+                var existing = config.SingleWorkRequest == null ? _repository.GetActiveByProviderId(providerId) : _repository.GetActiveByRequestKey(requestKey);
                 if (existing != null)
                 {
                     _logger.Debug("Found existing pending import for {0}, merging configuration", providerId);
 
                     // Merge compatible settings (widen scope if needed)
                     bool updated = false;
+                    if (config.SingleWorkRequest != null)
+                    {
+                        var requests = PendingSingleWorkRequest.Read(existing.SingleWorkRequests);
+                        var incoming = config.SingleWorkRequest;
+                        var previous = requests.FirstOrDefault(x => x.Key == incoming.Key);
+                        if (previous == null)
+                        {
+                            requests.Add(incoming);
+                            updated = true;
+                        }
+                        else if (JsonConvert.SerializeObject(previous) != JsonConvert.SerializeObject(incoming))
+                        {
+                            incoming.Search = incoming.Search || previous.Search;
+                            requests[requests.IndexOf(previous)] = incoming;
+                            updated = true;
+                        }
+                        existing.SingleWorkRequests = JsonConvert.SerializeObject(requests);
+                    }
+                    else if (existing.SingleWorkOnly)
+                    {
+                        // Only an explicit author-wide request may widen an exact-work queue.
+                        existing.SingleWorkOnly = false;
+                        updated = true;
+                    }
 
                     // Enable audiobook if requested and not already
                     if (config.CreateAudiobook && !existing.HasAudiobook())
@@ -302,6 +333,9 @@ namespace NzbDrone.Core.Books.Services
                 // Create new pending record
                 var pending = new PendingAuthorImport
                 {
+                    RequestKey = requestKey,
+                    SingleWorkOnly = config.SingleWorkRequest != null,
+                    SingleWorkRequests = config.SingleWorkRequest == null ? null : JsonConvert.SerializeObject(new[] { config.SingleWorkRequest }),
                     ProviderId = providerId,
                     ProviderPrefix = ExtractPrefix(providerId),
                     AuthorName = config.AuthorName,
@@ -460,13 +494,15 @@ namespace NzbDrone.Core.Books.Services
         private static bool IsActiveProviderUniqueViolation(SqliteException ex)
         {
             return ex?.SqliteErrorCode == 19 &&
-                   ex.Message?.Contains("PendingAuthorImport.ProviderId", StringComparison.OrdinalIgnoreCase) == true;
+                   (ex.Message?.Contains("PendingAuthorImport.ProviderId", StringComparison.OrdinalIgnoreCase) == true ||
+                    ex.Message?.Contains("PendingAuthorImport.RequestKey", StringComparison.OrdinalIgnoreCase) == true);
         }
 
         private static bool IsActiveProviderUniqueViolation(PostgresException ex)
         {
             return string.Equals(ex?.SqlState, "23505", StringComparison.Ordinal) &&
                    (string.Equals(ex.ConstraintName, "UX_PendingAuthorImport_Active", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ex.ConstraintName, "UX_PendingAuthorImport_SingleWork", StringComparison.OrdinalIgnoreCase) ||
                     ex.MessageText?.Contains("PendingAuthorImport", StringComparison.OrdinalIgnoreCase) == true);
         }
 
@@ -572,7 +608,8 @@ namespace NzbDrone.Core.Books.Services
         {
             while (true)
             {
-                var current = _repository.GetActiveByProviderId(item.ProviderId) ?? item;
+                var current = item.SingleWorkOnly ? _repository.Find(item.Id) : _repository.GetActiveByProviderId(item.ProviderId) ?? item;
+                if (current == null || !current.IsActive()) return;
                 current.LastError = error;
                 current.LastAttemptAt = DateTime.UtcNow;
 
@@ -588,11 +625,12 @@ namespace NzbDrone.Core.Books.Services
                 }
 
                 current.UpdateOverallStatus();
+                if (current.SingleWorkOnly && status == PendingImportStatus.Failed) current.OverallStatus = PendingImportStatus.Failed;
                 current.UpdatedAt = DateTime.UtcNow;
                 var expectedVersion = current.Version;
                 if (!_repository.TryUpdateRequest(current, expectedVersion))
                 {
-                    if (_repository.GetActiveByProviderId(item.ProviderId) == null)
+                    if ((item.SingleWorkOnly ? _repository.Find(item.Id) : _repository.GetActiveByProviderId(item.ProviderId))?.IsActive() != true)
                     {
                         _logger.Debug("Pending import {0} became inactive while its status was being updated", item.Id);
                         return;
@@ -611,7 +649,8 @@ namespace NzbDrone.Core.Books.Services
         {
             while (true)
             {
-                var current = _repository.GetActiveByProviderId(item.ProviderId) ?? item;
+                var current = item.SingleWorkOnly ? _repository.Find(item.Id) : _repository.GetActiveByProviderId(item.ProviderId) ?? item;
+                if (current == null || !current.IsActive()) return;
                 current.AttemptCount++;
                 current.MaxAttempts = 0;
                 current.LastAttemptAt = DateTime.UtcNow;
@@ -623,7 +662,7 @@ namespace NzbDrone.Core.Books.Services
                 var expectedVersion = current.Version;
                 if (!_repository.TryUpdateRequest(current, expectedVersion))
                 {
-                    if (_repository.GetActiveByProviderId(item.ProviderId) == null)
+                    if ((item.SingleWorkOnly ? _repository.Find(item.Id) : _repository.GetActiveByProviderId(item.ProviderId))?.IsActive() != true)
                     {
                         _logger.Debug("Pending import {0} became inactive while a retry was being scheduled", item.Id);
                         return;
@@ -667,6 +706,8 @@ namespace NzbDrone.Core.Books.Services
             var effectiveLimit = Math.Max(1, limit);
             return _repository.GetDueForProcessing(DateTime.UtcNow, effectiveLimit);
         }
+
+        public PendingAuthorImport GetById(int id) => _repository.Find(id);
 
         public PendingAuthorImport GetByProviderId(string providerId)
         {

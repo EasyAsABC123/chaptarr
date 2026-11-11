@@ -61,6 +61,10 @@ namespace NzbDrone.Core.Books
         public string EbookBooksToSearch { get; set; } // JSON serialized List<string>
         public string EbookTags { get; set; } // JSON serialized HashSet<int>
 
+        public string RequestKey { get; set; }
+        public bool SingleWorkOnly { get; set; }
+        public string SingleWorkRequests { get; set; }
+
         // Common fields
         public string Tags { get; set; } // JSON serialized HashSet<int>
         public bool SearchForMissingBooks { get; set; }

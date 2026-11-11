@@ -28,6 +28,7 @@ namespace NzbDrone.Core.Books.Commands
         private readonly IManageCommandQueue _commandQueueManager;
         private readonly IEventAggregator _eventAggregator;
         private readonly Logger _logger;
+        private readonly IAddBookService _addBookService;
 
         public ProcessPendingImportsCommandHandler(
             IPendingAuthorImportService pendingImportService,
@@ -37,7 +38,8 @@ namespace NzbDrone.Core.Books.Commands
             IProvideBookInfo bookInfo,
             IManageCommandQueue commandQueueManager,
             IEventAggregator eventAggregator,
-            Logger logger)
+            Logger logger,
+            IAddBookService addBookService = null)
         {
             _pendingImportService = pendingImportService;
             _authorLibraryService = authorLibraryService;
@@ -47,6 +49,7 @@ namespace NzbDrone.Core.Books.Commands
             _commandQueueManager = commandQueueManager;
             _eventAggregator = eventAggregator;
             _logger = logger;
+            _addBookService = addBookService;
         }
 
         public void Execute(ProcessPendingImportsCommand message)
@@ -199,6 +202,11 @@ namespace NzbDrone.Core.Books.Commands
         {
             _logger.Info("Processing pending import {0} for provider {1}", item.Id, item.ProviderId);
 
+            if (item.SingleWorkOnly)
+            {
+                return await ProcessSingleWorkAsync(item);
+            }
+
             try
             {
                 _logger.Info("Processing queued author import for provider {0}", item.ProviderId);
@@ -335,6 +343,69 @@ namespace NzbDrone.Core.Books.Commands
                 }
             }
 
+            return item;
+        }
+
+        private async Task<PendingAuthorImport> ProcessSingleWorkAsync(PendingAuthorImport item)
+        {
+            if (!_pendingImportService.TryBeginSingleWork(item)) return item;
+            try
+            {
+                var requests = PendingSingleWorkRequest.Read(item.SingleWorkRequests);
+                if (requests.Count == 0) throw new ArgumentException("Invalid empty single-work pending request.");
+                Author author = null;
+                var searchIds = new List<int>();
+                foreach (var request in requests)
+                {
+                    // A merge or cancellation invalidates this snapshot before another insertion/search.
+                    var current = _pendingImportService.GetById(item.Id);
+                    if (current == null || !current.IsActive() || current.Id != item.Id || current.Version != item.Version) return current ?? item;
+                    var book = await _addBookService.ReplaySingleWork(request.ToBook(), () =>
+                    {
+                        var snapshot = _pendingImportService.GetById(item.Id);
+                        return snapshot?.IsActive() == true && snapshot.Version == item.Version;
+                    });
+                    var parts = request.WorkProviderId.Split(new[] { ':' }, 2);
+                    var persisted = _bookService.FindByProviderId(parts[0], request.WorkProviderId, request.MediaType);
+                    if (book == null || book.Id <= 0 || persisted == null || persisted.Id != book.Id ||
+                        persisted.Editions?.Any(x => x.Id > 0) != true ||
+                        (request.Monitored && !persisted.IsMonitored()))
+                        throw new InvalidOperationException("Requested work has not materialized with its editions and monitoring.");
+                    author = persisted.Author;
+                    if (request.Search) searchIds.Add(persisted.Id);
+                }
+                var beforeSearch = _pendingImportService.GetById(item.Id);
+                if (beforeSearch?.IsActive() != true || beforeSearch.Version != item.Version) return beforeSearch ?? item;
+                if (searchIds.Any()) _commandQueueManager.Push(new BookSearchCommand(searchIds.Distinct().ToList()));
+                if (_pendingImportService.TryDeleteIfUnchanged(item))
+                {
+                    MarkSucceeded(item);
+                    _eventAggregator.PublishEvent(new PendingAuthorImportSucceededEvent(item, author));
+                }
+            }
+            catch (BookNotFoundException error)
+            {
+                _pendingImportService.UpdateStatus(item, PendingImportStatus.Failed, error.Message);
+                _eventAggregator.PublishEvent(new PendingAuthorImportFailedEvent(item));
+            }
+            catch (Exception error) when (error is BookMetadataPendingException || error is MetadataServerUnavailableException ||
+                error is NzbDrone.Core.MetadataSource.BookInfo.BookInfoException)
+            {
+                _pendingImportService.ScheduleRetry(item, error.Message);
+            }
+            catch (Exception error)
+            {
+                if (error is FluentValidation.ValidationException || error is ArgumentException || IsPermanentError(error))
+                {
+                    _pendingImportService.UpdateStatus(item, PendingImportStatus.Failed, error.Message);
+                    _eventAggregator.PublishEvent(new PendingAuthorImportFailedEvent(item));
+                }
+                else _pendingImportService.ScheduleRetry(item, error.Message);
+            }
+            finally
+            {
+                _pendingImportService.ReleaseSingleWork(item);
+            }
             return item;
         }
 
