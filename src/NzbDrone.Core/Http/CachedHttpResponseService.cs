@@ -96,7 +96,7 @@ namespace NzbDrone.Core.Http
                 cached.Value = result.Content;
                 cached.StatusCode = (int)result.StatusCode;
 
-                _repo.Upsert(cached);
+                _repo.StoreByUrl(cached);
             }
 
             return result;

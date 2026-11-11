@@ -18,7 +18,7 @@ namespace Chaptarr.Core.Test.Http
         private class RepositoryProxy : DispatchProxy
         {
             public CachedHttpResponse Cached { get; private set; }
-            public int UpsertCount { get; private set; }
+            public int StoreCount { get; private set; }
             public int DeleteCount { get; private set; }
 
             protected override object Invoke(MethodInfo targetMethod, object[] args)
@@ -26,17 +26,17 @@ namespace Chaptarr.Core.Test.Http
                 return targetMethod?.Name switch
                 {
                     "FindByUrl" => Cached,
-                    "Upsert" => RecordUpsert((CachedHttpResponse)args[0]),
+                    "StoreByUrl" => RecordStore((CachedHttpResponse)args[0]),
                     "Delete" => RecordDelete((CachedHttpResponse)args[0]),
                     _ => throw new NotImplementedException($"Repository proxy does not implement {targetMethod?.Name}")
                 };
             }
 
-            private CachedHttpResponse RecordUpsert(CachedHttpResponse response)
+            private object RecordStore(CachedHttpResponse response)
             {
-                UpsertCount++;
+                StoreCount++;
                 Cached = response;
-                return response;
+                return null;
             }
 
             private object RecordDelete(CachedHttpResponse response)
@@ -108,7 +108,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(first.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
             Assert.That(second.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
 
@@ -131,7 +131,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(first.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("bypass"));
             Assert.That(second.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("bypass"));
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
 
@@ -156,7 +156,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(repositoryState.DeleteCount, Is.EqualTo(1));
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
 
@@ -175,7 +175,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(first.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("MISS"));
             Assert.That(second.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("HIT"));
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
 
@@ -210,7 +210,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(first.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
             Assert.That(second.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
 
@@ -239,7 +239,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(response.Content, Does.Contain("\"id\":1"));
             Assert.That(repositoryState.DeleteCount, Is.EqualTo(1));
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
 
@@ -258,7 +258,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(first.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
             Assert.That(second.Headers.GetSingleValue("X-Cache-Status"), Is.EqualTo("BYPASS"));
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
         [Test]
@@ -273,7 +273,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.Search("missing"), Is.Empty);
             Assert.That(proxy.Search("missing"), Is.Empty);
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
 
@@ -289,7 +289,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.SearchBooks("missing"), Is.Empty);
             Assert.That(proxy.SearchBooks("missing"), Is.Empty);
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
 
@@ -305,7 +305,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.GetBookInfo("B000MISSING"), Is.Null);
             Assert.That(proxy.GetBookInfo("B000MISSING"), Is.Null);
-            Assert.That(repositoryState.UpsertCount, Is.Zero);
+            Assert.That(repositoryState.StoreCount, Is.Zero);
             Assert.That(client.GetCount, Is.EqualTo(2));
         }
         [Test]
@@ -320,7 +320,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.Search("positive"), Has.Count.EqualTo(1));
             Assert.That(proxy.Search("positive"), Has.Count.EqualTo(1));
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
 
@@ -336,7 +336,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.SearchBooks("positive"), Has.Count.EqualTo(1));
             Assert.That(proxy.SearchBooks("positive"), Has.Count.EqualTo(1));
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
 
@@ -352,7 +352,7 @@ namespace Chaptarr.Core.Test.Http
 
             Assert.That(proxy.GetBookInfo("A1"), Is.Not.Null);
             Assert.That(proxy.GetBookInfo("A1"), Is.Not.Null);
-            Assert.That(repositoryState.UpsertCount, Is.EqualTo(1));
+            Assert.That(repositoryState.StoreCount, Is.EqualTo(1));
             Assert.That(client.GetCount, Is.EqualTo(1));
         }
     }
