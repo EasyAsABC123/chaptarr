@@ -36,7 +36,7 @@ jobs:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           mkdir -p .homelab-image
-          cp _output/net10.0/Chaptarr.Core.dll _output/net10.0/Chaptarr.Core.pdb _output/net10.0/Chaptarr.Http.dll _output/net10.0/Chaptarr.Http.pdb .homelab-image/
+          cp _output/net10.0/Chaptarr.Core.dll _output/net10.0/Chaptarr.Core.pdb _output/net10.0/Chaptarr.Http.dll _output/net10.0/Chaptarr.Http.pdb _output/net10.0/Chaptarr.Api.V1.dll _output/net10.0/Chaptarr.Api.V1.pdb .homelab-image/
           jq -n --arg commit "$SOURCE_REVISION" '{commit: $commit, baseline: "e67374f4b3fed01bbf08f18672add944062fcb49", cacheMigration: 129}' > .homelab-image/build.json
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f

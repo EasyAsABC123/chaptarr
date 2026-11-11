@@ -1423,6 +1423,11 @@ namespace Chaptarr.Api.V1.Books
 	                }
 	                throw;
 	            }
+            catch (BookMetadataPendingException)
+            {
+                // Expected preparation is handled by the retryable HTTP contract.
+                throw;
+            }
 	            catch (Exception ex)
 	            {
 	                _logger.Error(ex, "[AddBook] Unexpected error");

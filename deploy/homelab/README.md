@@ -1,6 +1,6 @@
 # Durable book request repair
 
-The image overlays only the tested Core and HTTP assemblies on the pinned official 0.9.965 image. Its source baseline is e67374f4b3fed01bbf08f18672add944062fcb49 and retains the deployed targeted single-work behavior. A book request must not import the author's entire catalog.
+The image overlays only the tested Core, HTTP and API assemblies on the pinned official 0.9.965 image. Its source baseline is e67374f4b3fed01bbf08f18672add944062fcb49 and retains the deployed targeted single-work behavior. A book request must not import the author's entire catalog.
 
 Cache migration 129 removes older duplicate HTTP responses by LastRefresh/Id and enforces one row per exact URL. Cache storage uses an atomic URL upsert, including concurrent cold misses. Existing metadata and no-store cache semantics remain intact.
 
