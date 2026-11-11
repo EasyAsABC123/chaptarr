@@ -89,6 +89,8 @@ namespace NzbDrone.Core.Books.Services
         // Exact single-work requests retain admission payloads through metadata outages.
         [Newtonsoft.Json.JsonIgnore]
         public PendingSingleWorkRequest SingleWorkRequest { get; set; }
+        [Newtonsoft.Json.JsonIgnore]
+        public int? MinimumMetadataRetryAfterSeconds { get; set; }
 
         // Pending import support
         public bool QueueIfUnavailable { get; set; } = false;

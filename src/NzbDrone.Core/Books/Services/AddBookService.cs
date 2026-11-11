@@ -431,6 +431,12 @@ namespace NzbDrone.Core.Books
                 var workId = ResolveRequestedWorkProviderId(request);
                 var authorId = GetAuthorProviderId(request.Author);
                 var config = BuildRequestedBookMonitoringConfig(request, new List<string> { workId }, request.AddOptions?.SearchForNewBook == true);
+                config.MinimumMetadataRetryAfterSeconds = error switch
+                {
+                    BookMetadataPendingException pending => pending.RetryAfterSeconds,
+                    MetadataServerUnavailableException unavailable => unavailable.RetryAfterSeconds,
+                    _ => 60
+                };
                 config.SingleWorkRequest = PendingSingleWorkRequest.Create(request, workId, authorId, config);
                 var pendingId = await _pendingImportService.EnqueueAsync(authorId, config, "book");
                 if (pendingId <= 0) throw new InvalidOperationException("Pending single-work request was not persisted.");

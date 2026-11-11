@@ -28,6 +28,7 @@ namespace NzbDrone.Core.Books.Services
         PendingAuthorImport GetById(int id) => null;
         void UpdateStatus(PendingAuthorImport item, PendingImportStatus status, string error);
         void ScheduleRetry(PendingAuthorImport item, string error);
+        void ScheduleRetry(PendingAuthorImport item, string error, TimeSpan minimumRetryAfter) => ScheduleRetry(item, error);
         void Cancel(int id);
         void RetryNow(int id);
         void CleanupOldCompleted();
@@ -311,8 +312,8 @@ namespace NzbDrone.Core.Books.Services
                     if (updated)
                     {
                         existing.UpdatedAt = DateTime.UtcNow;
-                        // Trigger immediate processing rather than waiting for scheduled delay
-                        existing.NextAttemptAt = DateTime.UtcNow;
+                        // A repeated exact request must not bypass its persisted metadata deadline.
+                        if (!existing.SingleWorkOnly) existing.NextAttemptAt = DateTime.UtcNow;
                         existing.UpdateOverallStatus();
                         var expectedVersion = existing.Version;
                         if (_repository.TryUpdateRequest(existing, expectedVersion))
@@ -341,7 +342,7 @@ namespace NzbDrone.Core.Books.Services
                     AuthorName = config.AuthorName,
                     DiscoveredAuthorFolderPath = config.DiscoveredAuthorFolderPath,
                     CreatedAt = DateTime.UtcNow,
-                    NextAttemptAt = DateTime.UtcNow,
+                    NextAttemptAt = config.SingleWorkRequest == null ? DateTime.UtcNow : DateTime.UtcNow.AddSeconds(Math.Clamp(config.MinimumMetadataRetryAfterSeconds ?? 60, 1, 900)),
                     // Zero is the persisted/API representation for an unbounded retry lifecycle.
                     // Declared terminal outcomes are stopped by ProcessPendingImportsCommandHandler;
                     // transient "not ready" states must not age into a synthetic terminal.
@@ -645,7 +646,9 @@ namespace NzbDrone.Core.Books.Services
             }
         }
 
-        public void ScheduleRetry(PendingAuthorImport item, string error)
+        public void ScheduleRetry(PendingAuthorImport item, string error) => ScheduleRetry(item, error, TimeSpan.Zero);
+
+        public void ScheduleRetry(PendingAuthorImport item, string error, TimeSpan minimumRetryAfter)
         {
             while (true)
             {
@@ -656,6 +659,11 @@ namespace NzbDrone.Core.Books.Services
                 current.LastAttemptAt = DateTime.UtcNow;
                 current.LastError = error;
                 current.NextAttemptAt = CalculateNextAttempt(current.AttemptCount);
+                if (current.SingleWorkOnly && minimumRetryAfter > TimeSpan.Zero)
+                {
+                    var minimum = DateTime.UtcNow.AddSeconds(Math.Clamp(Math.Ceiling(minimumRetryAfter.TotalSeconds), 1, 900));
+                    if (current.NextAttemptAt < minimum) current.NextAttemptAt = minimum;
+                }
                 current.OverallStatus = PendingImportStatus.Retrying;
                 current.UpdatedAt = DateTime.UtcNow;
 

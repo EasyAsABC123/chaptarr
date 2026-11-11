@@ -177,6 +177,30 @@ namespace Chaptarr.Core.Test.Books
             Assert.That(h.Rows.Single().LastError, Is.EqualTo("Cancelled by user"));
         }
 
+        [TestCase(false, 60)]
+        [TestCase(false, 900)]
+        [TestCase(true, 60)]
+        [TestCase(true, 900)]
+        public void metadata_retry_after_is_a_persisted_minimum_and_duplicates_do_not_reset_it(bool unavailable, int seconds)
+        {
+            var h = new Harness();
+            h.Failure = unavailable ? new MetadataServerUnavailableException("work", TimeSpan.FromSeconds(seconds))
+                : new BookMetadataPendingException("gr:42", TimeSpan.FromSeconds(seconds));
+            var admittedAt = DateTime.UtcNow;
+            var id = Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(h.Request())).PendingId;
+            var initialDeadline = h.Rows.Single().NextAttemptAt;
+            Assert.That(initialDeadline, Is.GreaterThanOrEqualTo(admittedAt.AddSeconds(seconds)));
+            Assert.That(h.Pending.GetDueForProcessing(), Is.Empty);
+            h.Failure = new BookMetadataPendingException("gr:42", TimeSpan.FromSeconds(1));
+            Assert.That(Assert.ThrowsAsync<PendingBookRequestException>(() => h.Add.AddBook(h.Request())).PendingId, Is.EqualTo(id));
+            Assert.That(h.Rows.Single().NextAttemptAt, Is.EqualTo(initialDeadline));
+            h.Failure = unavailable ? new MetadataServerUnavailableException("work", TimeSpan.FromSeconds(seconds))
+                : new BookMetadataPendingException("gr:42", TimeSpan.FromSeconds(seconds));
+            var retriedAt = DateTime.UtcNow; h.Process();
+            Assert.That(h.Rows.Single().NextAttemptAt, Is.GreaterThanOrEqualTo(retriedAt.AddSeconds(seconds)));
+            h.Restart(); Assert.That(h.Pending.GetDueForProcessing(), Is.Empty);
+        }
+
         [Test]
         public void missing_pinned_edition_does_not_materialize_a_substitute_work_edition()
         {

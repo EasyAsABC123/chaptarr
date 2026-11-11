@@ -391,7 +391,13 @@ namespace NzbDrone.Core.Books.Commands
             catch (Exception error) when (error is BookMetadataPendingException || error is MetadataServerUnavailableException ||
                 error is NzbDrone.Core.MetadataSource.BookInfo.BookInfoException)
             {
-                _pendingImportService.ScheduleRetry(item, error.Message);
+                var seconds = error switch
+                {
+                    BookMetadataPendingException pending => pending.RetryAfterSeconds,
+                    MetadataServerUnavailableException unavailable => unavailable.RetryAfterSeconds,
+                    _ => 60
+                };
+                _pendingImportService.ScheduleRetry(item, error.Message, TimeSpan.FromSeconds(seconds));
             }
             catch (Exception error)
             {
