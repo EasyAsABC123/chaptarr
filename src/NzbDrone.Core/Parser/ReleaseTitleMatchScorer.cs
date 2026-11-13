@@ -72,6 +72,8 @@ namespace NzbDrone.Core.Parser
         private const int HintOnlyPrefixGuardTokenThreshold = 2;
         private const string DecimalPointToken = "chaptarrdecimalpoint";
 
+        private static readonly Regex OmnibusContentsRangeRegex = new Regex(@"^(?<title>.+?)\s+\((?<work>.+?)\s+(?<first>[0-9]{1,3})\s*[-–—]\s*(?<last>[0-9]{1,3})\)\s*$", RegexOptions.Compiled);
+
         private static readonly Regex TokenRegex = new Regex(@"\p{Nd}+(?:\.\p{Nd}+)+|[\p{L}\p{Nd}]+", RegexOptions.Compiled);
         private static readonly Regex PossessiveRegex = new Regex(@"['\u2018\u2019]s\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex DecimalPointBetweenDigitsRegex = new Regex(@"(?<=\p{Nd})\.(?=\p{Nd})", RegexOptions.Compiled);
@@ -884,6 +886,24 @@ namespace NzbDrone.Core.Parser
             var primaryTitle = GetPrimaryBookTitle(book);
 
             AddTitleVariants(context.PrimaryVariants, primaryTitle);
+            if (book?.IsOmnibus == true)
+            {
+                var contents = OmnibusContentsRangeRegex.Match(primaryTitle ?? string.Empty);
+                var baseTokens = Tokenize(contents.Groups["title"].Value);
+                var workTokens = Tokenize(contents.Groups["work"].Value);
+                if (contents.Success && workTokens.Count > 0 &&
+                    baseTokens.Take(workTokens.Count).SequenceEqual(workTokens) &&
+                    baseTokens.Skip(workTokens.Count).Contains("omnibus") &&
+                    baseTokens.Skip(workTokens.Count).All(token => token == "omnibus" || token == "edition") &&
+                    int.TryParse(contents.Groups["first"].Value, out var first) &&
+                    int.TryParse(contents.Groups["last"].Value, out var last) && first > 0 && last >= first)
+                {
+                    // This is the contents of one explicitly catalogued omnibus,
+                    // not a release-side range or a different work's subtitle.
+                    AddTitleVariants(context.PrimaryVariants, contents.Groups["title"].Value);
+                }
+            }
+
             context.PrimaryTitle = primaryTitle;
 
             foreach (var variant in context.PrimaryVariants)
@@ -1424,7 +1444,7 @@ namespace NzbDrone.Core.Parser
                    (context?.PrefixAllowanceTokens.Contains(token) ?? false);
         }
 
-        private static bool IsMetadataToken(string token)
+        internal static bool IsMetadataToken(string token)
         {
             if (string.IsNullOrWhiteSpace(token))
             {

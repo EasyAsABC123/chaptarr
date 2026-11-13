@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using NzbDrone.Core.Books;
 
@@ -54,7 +56,7 @@ namespace NzbDrone.Core.Parser
                 return ReleasePackDetection.None();
             }
 
-            var explicitPack = DetectExplicitMultiBookPack(releaseTitle);
+            var explicitPack = DetectExplicitMultiBookPack(releaseTitle, targetBook);
             if (explicitPack != null)
             {
                 return explicitPack;
@@ -85,7 +87,39 @@ namespace NzbDrone.Core.Parser
             return ReleasePackDetection.None();
         }
 
-        private static ReleasePackDetection DetectExplicitMultiBookPack(string releaseTitle)
+        private static bool IsRequestedOmnibusMarker(string releaseTitle, Match marker, Book targetBook)
+        {
+            if (targetBook?.IsOmnibus != true ||
+                !string.Equals(marker.Value, "omnibus", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(targetBook.Author?.Name) ||
+                !ReleaseTitleMatchScorer.Tokenize(ReleaseTitleMatchScorer.GetPrimaryBookTitle(targetBook)).Contains("omnibus"))
+            {
+                return false;
+            }
+
+            // VIP is an indexer access tag, not a book title. Keep this removal
+            // limited to that complete bracketed tag; pack checks use the original.
+            var identityTitle = Regex.Replace(Parser.CleanReleaseTitleForParsing(releaseTitle),
+                @"\[\s*VIP\s*\]", string.Empty, RegexOptions.IgnoreCase);
+            var match = ReleaseTitleMatchScorer.FindBestMatch(identityTitle,
+                                                              targetBook.Author.Name,
+                                                              new[] { targetBook });
+            if (match?.IsMatch != true || match.MeaningfulLeftoverCount != 0)
+            {
+                return false;
+            }
+
+            // Match only this work, its author, and existing metadata tokens.
+            // Unknown extra titles cannot hide behind an omnibus exemption,
+            // and this needs no author-catalog traversal for each release.
+            var authorTokens = ReleaseTitleMatchScorer.Tokenize(targetBook.Author.Name);
+            return ReleaseTitleMatchScorer.Tokenize(identityTitle)
+                .Select((token, index) => (token, index))
+                .All(item => (item.index >= match.MatchedStart && item.index <= match.MatchedEnd) ||
+                             authorTokens.Contains(item.token) || ReleaseTitleMatchScorer.IsMetadataToken(item.token));
+        }
+
+        private static ReleasePackDetection DetectExplicitMultiBookPack(string releaseTitle, Book targetBook)
         {
             foreach (var (regex, packType) in new[]
             {
@@ -96,9 +130,17 @@ namespace NzbDrone.Core.Parser
                 (CompletePackRegex, "complete-pack")
             })
             {
-                var match = regex.Match(releaseTitle);
-                if (match.Success)
+                foreach (Match match in regex.Matches(releaseTitle))
                 {
+                    // An omnibus can itself be the one explicitly requested
+                    // work. Exempt only its intrinsic title marker, never other
+                    // pack/range markers or unrelated works bundled with it.
+                    if (regex == NamedPackRegex &&
+                        IsRequestedOmnibusMarker(releaseTitle, match, targetBook))
+                    {
+                        continue;
+                    }
+
                     return new ReleasePackDetection
                     {
                         Verdict = ReleasePackDetectionVerdict.MultipleBooks,
