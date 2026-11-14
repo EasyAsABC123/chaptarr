@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -36,6 +37,8 @@ namespace NzbDrone.Core.Parser
 
         private static readonly Regex BracketRangeRegex = new Regex(@"\[[^\]]*\b\d{1,3}\s*[-–—]\s*\d{1,3}\b[^\]]*\]",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex AudioMetadataRangeRegex = new Regex(@"\[\s*\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\s*(?:kbps|khz)\s*\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly Regex NamedPackRegex = new Regex(@"\b(?:trilogy|tetralogy|quadrilogy|pentalogy|quintilogy|hexalogy|heptalogy|octology|omnibus|discography|discografia)\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -233,6 +236,53 @@ namespace NzbDrone.Core.Parser
             return targetIsCovered && releaseHasAdditionalCoverage;
         }
 
+        private static bool IsRequestedOmnibusMarker(string releaseTitle, Match marker, Book targetBook)
+        {
+            if (targetBook?.IsOmnibus != true ||
+                !string.Equals(marker.Value, "omnibus", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(targetBook.Author?.Name) ||
+                !ReleaseTitleMatchScorer.Tokenize(ReleaseTitleMatchScorer.GetPrimaryBookTitle(targetBook)).Contains("omnibus"))
+            {
+                return false;
+            }
+
+            // An extra bracketed book range is not part of the requested work's
+            // identity. Keep bitrate/sample-rate ranges as ordinary metadata.
+            foreach (Match range in BracketRangeRegex.Matches(releaseTitle))
+            {
+                var rangeTokens = ReleaseTitleMatchScorer.Tokenize(range.Value);
+                if (!ReleaseTitleMatchScorer.IsNumericMetadataTail(rangeTokens, rangeTokens.Count - 2) &&
+                    !AudioMetadataRangeRegex.IsMatch(range.Value))
+                {
+                    return false;
+                }
+            }
+
+            // These bracketed fields are indexer/audio metadata, not book titles.
+            // Keep their removal local to identity proof; pack checks use the original.
+            var identityTitle = Regex.Replace(Parser.CleanReleaseTitleForParsing(AudioMetadataRangeRegex.Replace(releaseTitle, " ")),
+                @"\[\s*VIP\s*\]", string.Empty, RegexOptions.IgnoreCase);
+            var match = ReleaseTitleMatchScorer.FindBestMatch(identityTitle,
+                                                              targetBook.Author.Name,
+                                                              new[] { targetBook });
+            if (match?.IsMatch != true || match.MeaningfulLeftoverCount != 0)
+            {
+                return false;
+            }
+
+            // Match only this work, its author, and existing metadata tokens.
+            // Unknown extra titles cannot hide behind an omnibus exemption,
+            // and this needs no author-catalog traversal for each release.
+            var authorTokens = ReleaseTitleMatchScorer.Tokenize(targetBook.Author.Name);
+            var identityTokens = ReleaseTitleMatchScorer.Tokenize(identityTitle);
+            var authorSpans = ReleaseTitleMatchScorer.FindExactTitleSpans(identityTokens, authorTokens).ToList();
+            return identityTokens
+                .Select((token, index) => (token, index))
+                .All(item => (item.index >= match.MatchedStart && item.index <= match.MatchedEnd) ||
+                             authorTokens.Contains(item.token) || ReleaseTitleMatchScorer.IsMetadataToken(item.token) ||
+                             (item.token == "by" && authorSpans.Any(span => span.Start == item.index + 1)));
+        }
+
         private static ReleasePackDetection DetectExplicitMultiBookPack(string releaseTitle, Book targetBook)
         {
             foreach (var (regex, packType) in new[]
@@ -244,12 +294,23 @@ namespace NzbDrone.Core.Parser
                 (CompletePackRegex, "complete-pack")
             })
             {
-                var match = regex.Match(releaseTitle);
-                var tokens = ReleaseTitleMatchScorer.Tokenize(match.Value);
-                if (match.Success && (regex != BracketRangeRegex ||
-                    (ReleaseTitleMatchScorer.FindExactTitleSpans(tokens, ReleaseTitleMatchScorer.Tokenize(targetBook?.SeriesName)).Any() &&
-                     !ReleaseTitleMatchScorer.IsNumericMetadataTail(tokens, tokens.Count - 2))))
+                foreach (Match match in regex.Matches(releaseTitle))
                 {
+                    var tokens = ReleaseTitleMatchScorer.Tokenize(match.Value);
+                    if (regex == BracketRangeRegex &&
+                        (!ReleaseTitleMatchScorer.FindExactTitleSpans(tokens, ReleaseTitleMatchScorer.Tokenize(targetBook?.SeriesName)).Any() ||
+                         ReleaseTitleMatchScorer.IsNumericMetadataTail(tokens, tokens.Count - 2)))
+                    {
+                        continue;
+                    }
+
+                    // Only the requested work's intrinsic omnibus marker is exempt.
+                    // Other ranges, collections and repeated pack markers stay rejected.
+                    if (regex == NamedPackRegex && IsRequestedOmnibusMarker(releaseTitle, match, targetBook))
+                    {
+                        continue;
+                    }
+
                     return new ReleasePackDetection
                     {
                         Verdict = ReleasePackDetectionVerdict.MultipleBooks,

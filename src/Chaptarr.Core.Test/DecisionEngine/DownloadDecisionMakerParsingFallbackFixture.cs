@@ -858,6 +858,66 @@ namespace Chaptarr.Core.Test.DecisionEngine
             return decisionMaker.GetSearchDecision(new List<ReleaseInfo> { report }, criteria)[0];
         }
 
+        [TestCase(true)]
+        [TestCase(false)]
+        public void should_only_accept_matching_omnibus_releases_for_the_requested_omnibus_work(bool isOmnibus)
+        {
+            var author = new Author { Id = 102, Name = "Hugh Howey" };
+            var book = new Book
+            {
+                Id = 46503,
+                Title = "Wool",
+                Editions = new List<Edition>
+                {
+                    new Edition { Id = 113891, Title = "Wool Omnibus Edition (Wool 1 - 5)", Monitored = true }
+                },
+                IsOmnibus = isOmnibus,
+                MediaType = BookMediaType.Audiobook,
+                Author = author,
+                AuthorId = author.Id
+            };
+            author.Books = new List<Book> { book };
+            var criteria = new BookSearchCriteria
+            {
+                Author = author,
+                Books = new List<Book> { book },
+                UserInvokedSearch = true,
+                InteractiveSearch = true
+            };
+            var report = new ReleaseInfo
+            {
+                Title = "Wool Omnibus Edition by Hugh Howey [ENG / M4B] [VIP]",
+                Author = "Hugh Howey",
+                Indexer = "MyAnonamouse (Prowlarr)",
+                Categories = new List<int>(),
+                PublishDate = DateTime.UtcNow
+            };
+            var logger = LogManager.GetCurrentClassLogger();
+            var decisionMaker = new DownloadDecisionMaker(new List<IDecisionEngineSpecification>
+                                                          {
+                                                              new MultiBookReleaseSpecification(logger),
+                                                              new ReleaseTitleMatchSpecification(logger)
+                                                          },
+                                                          new TestParsingService(),
+                                                          CatalogBookService.Create(new List<Book> { book }),
+                                                          new TestEditionFtsRepository(),
+                                                          new NoOpCustomFormatCalculationService(),
+                                                          new NoOpRemoteBookAggregationService(),
+                                                          new NoOpReleaseNarratorMetadataEnricher(),
+                                                          (IConfigService)null,
+                                                          logger);
+            var decision = decisionMaker.GetSearchDecision(new List<ReleaseInfo> { report }, criteria)[0];
+
+            Assert.That(decision.Approved, Is.EqualTo(isOmnibus));
+            Assert.That(decision.RemoteBook.PackDetection.Verdict,
+                Is.EqualTo(isOmnibus ? ReleasePackDetectionVerdict.None : ReleasePackDetectionVerdict.MultipleBooks));
+            if (!isOmnibus)
+            {
+                Assert.That(decision.Rejections.Single().CanBypass, Is.True);
+                Assert.That(decision.Rejections.Single().Category, Is.EqualTo("Pack"));
+            }
+        }
+
         [Test]
         public void should_expose_interactive_source_before_decision_specifications_run()
         {

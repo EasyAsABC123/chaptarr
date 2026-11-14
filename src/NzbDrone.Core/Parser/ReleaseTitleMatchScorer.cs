@@ -230,6 +230,8 @@ namespace NzbDrone.Core.Parser
 
         // Normalization already classifies characters; rechecking UTF-16 halves would discard supplementary letters.
         private static readonly Regex NumericTokenRegex = new Regex(@"^[0-9]+(?:\.[0-9]+)?$", RegexOptions.Compiled);
+        private static readonly Regex OmnibusContentsRangeRegex = new Regex(@"^(?<title>.+?)\s+\((?<work>.+?)\s+(?<first>[0-9]{1,3})\s*[-–—]\s*(?<last>[0-9]{1,3})\)\s*$", RegexOptions.Compiled);
+
         private static readonly Regex TokenRegex = new Regex(@"\S+", RegexOptions.Compiled);
         private static readonly Regex DecimalPointBetweenDigitsRegex = new Regex(@"(?<=\p{Nd})\.(?=\p{Nd})", RegexOptions.Compiled);
         private static readonly Regex OptionalQualifierSegmentRegex = new Regex(@"\s*(?:" + TitleBracketCatalog.PairedSegmentPattern + @")\s*", RegexOptions.Compiled);
@@ -1620,6 +1622,24 @@ namespace NzbDrone.Core.Parser
                     .Distinct(StringComparer.OrdinalIgnoreCase).Select(Tokenize).ToList()
             };
             AddTitleVariants(context.PrimaryVariants, context.PrimaryTitle, book);
+            if (book?.IsOmnibus == true)
+            {
+                var contents = OmnibusContentsRangeRegex.Match(context.PrimaryTitle ?? string.Empty);
+                var baseTokens = Tokenize(contents.Groups["title"].Value);
+                var workTokens = Tokenize(contents.Groups["work"].Value);
+                if (contents.Success && workTokens.Count > 0 &&
+                    baseTokens.Take(workTokens.Count).SequenceEqual(workTokens) &&
+                    baseTokens.Skip(workTokens.Count).Contains("omnibus") &&
+                    baseTokens.Skip(workTokens.Count).All(token => token == "omnibus" || token == "edition") &&
+                    int.TryParse(contents.Groups["first"].Value, out var first) &&
+                    int.TryParse(contents.Groups["last"].Value, out var last) && first > 0 && last >= first)
+                {
+                    // This is the contents of one explicitly catalogued omnibus,
+                    // not a release-side range or a different work's subtitle.
+                    AddTitleVariants(context.PrimaryVariants, contents.Groups["title"].Value, book);
+                }
+            }
+
 
             // Shortened titles retain the selected edition's language; sibling checks reject ambiguous bases.
             var editionTitle = NormalizeExpandedVariant(GetSelectedEditionTitle(book));
